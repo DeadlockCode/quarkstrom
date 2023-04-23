@@ -28,3 +28,4 @@ rand = "0.8.5"
 # Other
 bytemuck = { version = "1.12", features = [ "derive" ] }
 pollster = "0.3.0"
+futures-intrusive = "0.5.0"

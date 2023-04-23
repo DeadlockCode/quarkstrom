@@ -1,12 +1,13 @@
 use std::{
     f32::consts::TAU,
-    time::{Duration, Instant}, num::NonZeroU32,
+    time::{Duration, Instant},
 };
 
 use bytemuck::{Pod, Zeroable};
 
 use gui::Gui;
-use rand::{Rng, rngs::ThreadRng};
+use rand::{rngs::ThreadRng, Rng};
+use ultraviolet::Vec2;
 use winit::{
     dpi::PhysicalSize,
     event::*,
@@ -34,7 +35,6 @@ pub struct World {
     num_particles: u32,
     num_colors: u32,
     universal_repulsive_strength: f32,
-    repulsive_distance: f32,
     interaction_distance: f32,
     interaction_multiplier: f32,
     velocity_half_life: f32,
@@ -42,18 +42,24 @@ pub struct World {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug)]
 struct Vertex {
-    position: [f32; 2],
+    position: Vec2,
 }
 
+unsafe impl Pod for Vertex {}
+unsafe impl Zeroable for Vertex {}
+
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug)]
 struct Particle {
-    position: [f32; 2],
-    velocity: [f32; 2],
+    position: Vec2,
+    velocity: Vec2,
     color: u32,
 }
+
+unsafe impl Pod for Particle {}
+unsafe impl Zeroable for Particle {}
 
 impl Vertex {
     const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
@@ -69,13 +75,13 @@ impl Vertex {
 
 const VERTICES: [Vertex; 3] = [
     Vertex {
-        position: [0.0, 2.0],
+        position: Vec2::new(0.0, 2.0),
     },
     Vertex {
-        position: [-1.73205080757, -1.0],
+        position: Vec2::new(-1.73205080757, -1.0),
     },
     Vertex {
-        position: [1.73205080757, -1.0],
+        position: Vec2::new(1.73205080757, -1.0),
     },
 ];
 
@@ -240,10 +246,9 @@ impl State {
             num_particles,
             num_colors,
             universal_repulsive_strength: 50.0,
-            repulsive_distance: 5.0,
             interaction_distance: 100.0,
-            interaction_multiplier: 5.0,
-            velocity_half_life: 0.02,
+            interaction_multiplier: 1.0,
+            velocity_half_life: 0.04,
             dt: 0.01,
         };
 
@@ -328,45 +333,50 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let particles = (0..64*256)
-            .map(|_| {
-                Particle {
-                    position: [0.; 2],
-                    velocity: [0.; 2],
-                    color: 0,
-                }
+        let particles = (0..64 * 256)
+            .map(|_| Particle {
+                position: Vec2::zero(),
+                velocity: Vec2::zero(),
+                color: 0,
             })
             .collect::<Vec<_>>();
+
         let particle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Particle Buffer"),
             contents: bytemuck::cast_slice(&particles),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST,
         });
+        
         let particle_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Particle Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                ],
             });
         let particle_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Particle Bind Group"),
             layout: &particle_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: particle_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particle_buffer.as_entire_binding(),
+                },
+            ],
         });
-        let attraction_matrix = (0..256 * 256)
-            .map(move |_| 0.0)
-            .collect::<Vec<_>>();
+
+        let attraction_matrix = (0..256 * 256).map(move |_| 0.0).collect::<Vec<_>>();
         let attraction_matrix_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Attraction Matrix Buffer"),
@@ -460,8 +470,11 @@ impl State {
         self.queue
             .write_buffer(&self.world_buffer, 0, bytemuck::cast_slice(&[self.world]));
 
-        self.queue
-            .write_buffer(&self.attraction_matrix_buffer, 0, bytemuck::cast_slice(&self.attraction_matrix));
+        self.queue.write_buffer(
+            &self.attraction_matrix_buffer,
+            0,
+            bytemuck::cast_slice(&self.attraction_matrix),
+        );
 
         self.particles = (0..self.world.num_particles)
             .map(|_| {
@@ -472,18 +485,17 @@ impl State {
                 let color = self.rng.gen_range(0..self.world.num_colors);
 
                 Particle {
-                    position: [
-                        d * r.sqrt() * a.cos() + self.world.size * 0.5,
-                        d * r.sqrt() * a.sin() + self.world.size * 0.5,
-                    ],
-                    velocity: [0.; 2],
+                    position: d * r.sqrt() * Vec2::new(a.cos(), a.sin()) + 0.5 * Vec2::new(self.world.size, self.world.size),
+                    velocity: Vec2::zero(),
                     color,
                 }
             })
             .collect::<Vec<_>>();
-        self.queue
-            .write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(&self.particles));
-
+        self.queue.write_buffer(
+            &self.particle_buffer,
+            0,
+            bytemuck::cast_slice(&self.particles),
+        );
     }
 
     pub fn window(&self) -> &Window {
@@ -526,9 +538,8 @@ impl State {
         self.gui.input(&self.window, event);
     }
 
-    fn update(&mut self) {
+    async fn update(&mut self) {
         self.gui.update(&self.window);
-
 
         if self.gui.state.restart {
             self.world.size = self.gui.state.world_size;
@@ -562,7 +573,11 @@ impl State {
             compute_pass.set_bind_group(0, &self.world_bind_group, &[]);
             compute_pass.set_bind_group(1, &self.particle_bind_group, &[]);
             compute_pass.set_bind_group(2, &self.attraction_matrix_bind_group, &[]);
-            compute_pass.dispatch_workgroups((self.world.num_particles as f32 / 64.0).ceil() as u32, 1, 1);
+            compute_pass.dispatch_workgroups(
+                (self.world.num_particles as f32 / 64.0).ceil() as u32,
+                1,
+                1,
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -663,7 +678,7 @@ pub async fn run() {
                 _ => {}
             },
             Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                state.update();
+                pollster::block_on(state.update());
                 match state.render() {
                     Ok(_) => {}
                     // Reconfigure the surface if lost
@@ -689,4 +704,36 @@ pub async fn run() {
             _ => {}
         }
     });
+}
+
+struct Grid {
+    cells: Vec<Vec<u32>>,
+    resolution: usize,
+    width: f32,
+}
+
+impl Grid {
+    fn new(min_cell_width: f32, width: f32) -> Self {
+        let resolution = ((width / min_cell_width).floor() as usize).max(1);
+
+        Self {
+            cells: vec![Vec::new(); resolution * resolution],
+            resolution,
+            width,
+        }
+    }
+
+    fn insert(&mut self, index: u32, position: Vec2) {
+        let pos = position / self.width * self.resolution as f32;
+        let x = pos.x.floor() as usize;
+        let y = pos.y.floor() as usize;
+
+        for i in -1..=1 {
+            for j in -1..=1 {
+                let x = (x as i32 + i) as usize % self.resolution;
+                let y = (y as i32 + j) as usize % self.resolution;
+                self.cells[x + y * self.resolution].push(index);
+            }
+        }
+    }
 }

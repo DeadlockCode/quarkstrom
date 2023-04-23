@@ -5,7 +5,6 @@ struct World {
     num_particles: u32,
     num_colors: u32,
     universal_repulsive_strength: f32,
-    repulsive_distance: f32,
     interaction_distance: f32,
     interaction_multiplier: f32,
     velocity_half_life: f32,
