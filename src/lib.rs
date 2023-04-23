@@ -242,7 +242,7 @@ impl State {
             universal_repulsive_strength: 50.0,
             repulsive_distance: 5.0,
             interaction_distance: 100.0,
-            interaction_multiplier: 0.1,
+            interaction_multiplier: 5.0,
             velocity_half_life: 0.02,
             dt: 0.01,
         };

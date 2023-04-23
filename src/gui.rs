@@ -15,7 +15,7 @@ impl Default for State {
             num_particles: 2000,
             num_colors: 5,
             random_attraction: true,
-            attraction_matrix: vec![0.0],
+            attraction_matrix: vec![0.; 25],
         }
     }
 }
@@ -110,16 +110,16 @@ impl Gui {
                     ui.checkbox("Random Attraction Matrix", &mut self.state.random_attraction);
                     if !self.state.random_attraction {
                         ui.color_button("WOWO", [0.; 4]);
-                        for j in 0..self.state.num_colors as usize {
-                            let _num_id = ui.push_id_usize(j);
-                            ui.same_line();
-                            ui.color_button("WOWO", hue2rgb(j as f32 / self.state.num_colors as f32));
-                        }
                         for i in 0..self.state.num_colors as usize {
-                            let _label_id = ui.push_id_usize(i);
+                            let _num_id = ui.push_id_usize(i);
+                            ui.same_line();
                             ui.color_button("WOWO", hue2rgb(i as f32 / self.state.num_colors as f32));
-                            for j in 0..self.state.num_colors as usize {
-                                let _num_id = ui.push_id_usize(j);
+                        }
+                        for j in 0..self.state.num_colors as usize {
+                            let _label_id = ui.push_id_usize(j);
+                            ui.color_button("WOWO", hue2rgb(j as f32 / self.state.num_colors as f32));
+                            for i in 0..self.state.num_colors as usize {
+                                let _num_id = ui.push_id_usize(i);
                                 ui.same_line();
                                 let attraction = self.state.attraction_matrix[i + j * self.state.num_colors as usize];
                                 let r = if attraction.is_sign_negative() {-attraction } else { 0.0 };
