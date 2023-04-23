@@ -9,7 +9,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { 
+        Self {
             restart: false,
             world_size: 500.0,
             num_particles: 2000,
@@ -66,7 +66,7 @@ impl Gui {
 
         let renderer = imgui_wgpu::Renderer::new(&mut imgui, device, queue, renderer_config);
 
-        Self { 
+        Self {
             imgui,
             renderer,
             platform,
@@ -100,40 +100,92 @@ impl Gui {
                 .size([300.0, 600.0], imgui::Condition::FirstUseEver)
                 .build(|| {
                     self.state.restart = ui.button("Restart");
+                    ui.same_line();
+                    if ui.button("Snek") {
+                        self.state.random_attraction = false;
+                        self.state.attraction_matrix = vec![
+                            0f32;
+                            self.state.num_colors as usize
+                                * self.state.num_colors as usize
+                        ];
+                        for i in 0..self.state.num_colors {
+                            if i != 0 {
+                                self.state.attraction_matrix[(i + (i - 1) * self.state.num_colors) as usize] = 0.2;
+                            }
+                            self.state.attraction_matrix[(i + i * self.state.num_colors) as usize] = 1.0;
+                        }
+                        self.state.restart = true;
+                    }
                     ui.separator();
                     ui.slider("World size", 0.0, 1000.0, &mut self.state.world_size);
                     ui.slider("Particles", 0, 64 * 256, &mut self.state.num_particles);
+                    let num_colors = self.state.num_colors;
                     if ui.slider("Colors", 1, 256, &mut self.state.num_colors) {
-                        self.state.attraction_matrix = vec![0f32; self.state.num_colors as usize * self.state.num_colors as usize];
+                        let last_matrix = self.state.attraction_matrix.clone();
+
+                        self.state.attraction_matrix = vec![
+                            0f32;
+                            self.state.num_colors as usize
+                                * self.state.num_colors as usize
+                        ];
+
+                        for i in 0..num_colors.min(self.state.num_colors) {
+                            for j in 0..num_colors.min(self.state.num_colors) {
+                                self.state.attraction_matrix[(i + j * self.state.num_colors) as usize] = last_matrix[(i + j * num_colors) as usize];
+                            }
+                        }
                     }
 
-                    ui.checkbox("Random Attraction Matrix", &mut self.state.random_attraction);
+                    ui.checkbox(
+                        "Random Attraction Matrix",
+                        &mut self.state.random_attraction,
+                    );
                     if !self.state.random_attraction {
                         ui.color_button("WOWO", [0.; 4]);
                         for i in 0..self.state.num_colors as usize {
                             let _num_id = ui.push_id_usize(i);
                             ui.same_line();
-                            ui.color_button("WOWO", hue2rgb(i as f32 / self.state.num_colors as f32));
+                            ui.color_button(
+                                "WOWO",
+                                hue2rgb(i as f32 / self.state.num_colors as f32),
+                            );
                         }
                         for j in 0..self.state.num_colors as usize {
                             let _label_id = ui.push_id_usize(j);
-                            ui.color_button("WOWO", hue2rgb(j as f32 / self.state.num_colors as f32));
+                            ui.color_button(
+                                "WOWO",
+                                hue2rgb(j as f32 / self.state.num_colors as f32),
+                            );
                             for i in 0..self.state.num_colors as usize {
                                 let _num_id = ui.push_id_usize(i);
                                 ui.same_line();
-                                let attraction = self.state.attraction_matrix[i + j * self.state.num_colors as usize];
-                                let r = if attraction.is_sign_negative() {-attraction } else { 0.0 };
-                                let g = if attraction.is_sign_positive() { attraction } else { 0.0 };
+                                let attraction = self.state.attraction_matrix
+                                    [i + j * self.state.num_colors as usize];
+                                let r = if attraction.is_sign_negative() {
+                                    -attraction
+                                } else {
+                                    0.0
+                                };
+                                let g = if attraction.is_sign_positive() {
+                                    attraction
+                                } else {
+                                    0.0
+                                };
                                 if ui.color_button("WOWO", [r, g, 0., 0.]) {
-                                    self.state.attraction_matrix[i + j * self.state.num_colors as usize] += 0.1;
-                                    if self.state.attraction_matrix[i + j * self.state.num_colors as usize] > 1.01 {
-                                        self.state.attraction_matrix[i + j * self.state.num_colors as usize] = -1.0;
+                                    self.state.attraction_matrix
+                                        [i + j * self.state.num_colors as usize] += 0.1;
+                                    if self.state.attraction_matrix
+                                        [i + j * self.state.num_colors as usize]
+                                        > 1.01
+                                    {
+                                        self.state.attraction_matrix
+                                            [i + j * self.state.num_colors as usize] = -1.0;
                                     }
                                 }
                             }
                         }
                     }
-                    
+
                     let mouse_pos = ui.io().mouse_pos;
                     ui.text(format!(
                         "Mouse Position: ({:.1},{:.1})",
@@ -145,18 +197,13 @@ impl Gui {
     }
 
     pub fn render<'a>(
-        &'a mut self, 
+        &'a mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'a>,
     ) {
         self.renderer
-            .render(
-                self.imgui.render(),
-                queue,
-                device,
-                render_pass,
-            )
+            .render(self.imgui.render(), queue, device, render_pass)
             .expect("Rendering failed");
     }
 }
