@@ -1,12 +1,13 @@
 use std::{
-    f32::consts::TAU,
+    sync::mpsc::channel,
+    thread,
     time::{Duration, Instant},
 };
 
 use bytemuck::{Pod, Zeroable};
 
-use gui::Gui;
-use rand::{rngs::ThreadRng, Rng};
+pub use gui::Gui;
+use gui::GuiHandler;
 use ultraviolet::Vec2;
 use winit::{
     dpi::PhysicalSize,
@@ -29,19 +30,6 @@ pub struct Camera {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct World {
-    size: f32,
-    num_particles: u32,
-    num_colors: u32,
-    universal_repulsive_strength: f32,
-    interaction_distance: f32,
-    interaction_multiplier: f32,
-    velocity_half_life: f32,
-    dt: f32,
-}
-
-#[repr(C)]
 #[derive(Copy, Clone, Debug)]
 struct Vertex {
     position: Vec2,
@@ -52,14 +40,14 @@ unsafe impl Zeroable for Vertex {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-struct Particle {
-    position: Vec2,
-    velocity: Vec2,
-    color: u32,
+pub struct Instance {
+    pub position: Vec2,
+    pub radius: f32,
+    pub color: u32,
 }
 
-unsafe impl Pod for Particle {}
-unsafe impl Zeroable for Particle {}
+unsafe impl Pod for Instance {}
+unsafe impl Zeroable for Instance {}
 
 impl Vertex {
     const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
@@ -85,14 +73,14 @@ const VERTICES: [Vertex; 3] = [
     },
 ];
 
-impl Particle {
+impl Instance {
     const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2, 3 => Uint32];
+        wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32, 3 => Sint32];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Particle>() as wgpu::BufferAddress,
+            array_stride: mem::size_of::<Instance>() as wgpu::BufferAddress,
             // We need to switch from using a step mode of Vertex to Instance
             // This means that our shaders will only change to use the next
             // instance when the shader starts processing a new instance
@@ -102,7 +90,7 @@ impl Particle {
     }
 }
 
-struct State {
+struct State<GUI: Gui> {
     window: Window,
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -110,33 +98,20 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     input: WinitInputHelper,
-    compute_pipeline: wgpu::ComputePipeline,
-    particles: Vec<Particle>,
-    particle_buffer: wgpu::Buffer,
-    particle_bind_group: wgpu::BindGroup,
-    attraction_matrix: Vec<f32>,
-    attraction_matrix_buffer: wgpu::Buffer,
-    attraction_matrix_bind_group: wgpu::BindGroup,
+    instances: Vec<Instance>,
+    instance_buffer: wgpu::Buffer,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     camera: Camera,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    world: World,
-    world_buffer: wgpu::Buffer,
-    world_bind_group: wgpu::BindGroup,
 
-    gui: Gui,
-    rng: ThreadRng,
+    gui: GuiHandler<GUI>,
 }
 
-impl State {
+impl<GUI: Gui> State<GUI> {
     // Creating some of the wgpu types requires async code
     async fn new(window: Window) -> Self {
-        let world_size = 500.0;
-        let num_particles = 64 * 100;
-        let num_colors = 7;
-
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -201,13 +176,13 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let gui = Gui::new(&window, config.format, &device, &queue);
+        let gui = GuiHandler::new(&window, config.format, &device, &queue);
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
         let camera = Camera {
             position: [0.; 2],
-            scale: world_size,
+            scale: 500.0,
             aspect: config.width as f32 / config.height as f32,
         };
 
@@ -241,51 +216,10 @@ impl State {
             }],
         });
 
-        let world = World {
-            size: world_size,
-            num_particles,
-            num_colors,
-            universal_repulsive_strength: 50.0,
-            interaction_distance: 100.0,
-            interaction_multiplier: 1.0,
-            velocity_half_life: 0.04,
-            dt: 0.01,
-        };
-
-        let world_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("World Buffer"),
-            contents: bytemuck::cast_slice(&[world]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let world_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("World Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let world_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("World Bind Group"),
-            layout: &world_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: world_buffer.as_entire_binding(),
-            }],
-        });
-
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&world_bind_group_layout, &camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -295,7 +229,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc(), Particle::desc()],
+                buffers: &[Vertex::desc(), Instance::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -333,100 +267,20 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let particles = (0..64 * 256)
-            .map(|_| Particle {
-                position: Vec2::zero(),
-                velocity: Vec2::zero(),
-                color: 0,
-            })
-            .collect::<Vec<_>>();
+        let instances = Vec::new();
 
-        let particle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Particle Buffer"),
-            contents: bytemuck::cast_slice(&particles),
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer"),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-        });
-        
-        let particle_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Particle Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-        let particle_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Particle Bind Group"),
-            layout: &particle_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: particle_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let attraction_matrix = (0..256 * 256).map(move |_| 0.0).collect::<Vec<_>>();
-        let attraction_matrix_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Attraction Matrix Buffer"),
-                contents: bytemuck::cast_slice(&attraction_matrix),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            });
-        let attraction_matrix_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Attraction Matrix Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let attraction_matrix_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Attraction Matrix Bind Group"),
-            layout: &attraction_matrix_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: attraction_matrix_buffer.as_entire_binding(),
-            }],
-        });
-
-        let compute_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Compute Pipeline Layout"),
-                bind_group_layouts: &[
-                    &world_bind_group_layout,
-                    &particle_bind_group_layout,
-                    &attraction_matrix_bind_group_layout,
-                ],
-                push_constant_ranges: &[],
-            });
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Compute Pipeline"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "cs_main",
+            size: 1<<20,
+            mapped_at_creation: false,
         });
 
         let input = WinitInputHelper::new();
 
-        let mut res = Self {
+        Self {
             window,
             surface,
             device,
@@ -434,68 +288,15 @@ impl State {
             config,
             size,
             input,
-            compute_pipeline,
-            particles,
-            particle_buffer,
-            particle_bind_group,
-            attraction_matrix,
-            attraction_matrix_buffer,
-            attraction_matrix_bind_group,
+            instances,
+            instance_buffer,
             render_pipeline,
             vertex_buffer,
             camera,
             camera_buffer,
             camera_bind_group,
-            world,
-            world_buffer,
-            world_bind_group,
             gui,
-            rng: rand::thread_rng(),
-        };
-        res.world.size = res.gui.state.world_size;
-        res.world.num_particles = res.gui.state.num_particles;
-        res.world.num_colors = res.gui.state.num_colors;
-        res.attraction_matrix = if res.gui.state.random_attraction {
-            (0..res.world.num_colors * res.world.num_colors)
-                .map(|_| res.rng.gen_range(-1.0..1.0))
-                .collect::<Vec<_>>()
-        } else {
-            res.gui.state.attraction_matrix.clone()
-        };
-        res.restart();
-        res
-    }
-
-    pub fn restart(&mut self) {
-        self.queue
-            .write_buffer(&self.world_buffer, 0, bytemuck::cast_slice(&[self.world]));
-
-        self.queue.write_buffer(
-            &self.attraction_matrix_buffer,
-            0,
-            bytemuck::cast_slice(&self.attraction_matrix),
-        );
-
-        self.particles = (0..self.world.num_particles)
-            .map(|_| {
-                let r = self.rng.gen_range(0f32..1.0);
-                let a = self.rng.gen_range(0f32..TAU);
-                let d = 100.0;
-
-                let color = self.rng.gen_range(0..self.world.num_colors);
-
-                Particle {
-                    position: d * r.sqrt() * Vec2::new(a.cos(), a.sin()) + 0.5 * Vec2::new(self.world.size, self.world.size),
-                    velocity: Vec2::zero(),
-                    color,
-                }
-            })
-            .collect::<Vec<_>>();
-        self.queue.write_buffer(
-            &self.particle_buffer,
-            0,
-            bytemuck::cast_slice(&self.particles),
-        );
+        }
     }
 
     pub fn window(&self) -> &Window {
@@ -511,6 +312,15 @@ impl State {
 
             self.camera.aspect = new_size.width as f32 / new_size.height as f32;
         }
+    }
+
+    fn set_instances(&mut self, instances: Vec<Instance>) {
+        self.instances = instances;
+        self.queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&self.instances),
+        );
     }
 
     fn input(&mut self, event: &Event<()>) {
@@ -538,52 +348,11 @@ impl State {
         self.gui.input(&self.window, event);
     }
 
-    async fn update(&mut self) {
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.gui.update(&self.window);
-
-        if self.gui.state.restart {
-            self.world.size = self.gui.state.world_size;
-            self.world.num_particles = self.gui.state.num_particles;
-            self.world.num_colors = self.gui.state.num_colors;
-            self.attraction_matrix = if self.gui.state.random_attraction {
-                (0..self.world.num_colors * self.world.num_colors)
-                    .map(|_| self.rng.gen_range(-1.0..1.0))
-                    .collect::<Vec<_>>()
-            } else {
-                self.gui.state.attraction_matrix.clone()
-            };
-            self.restart();
-        }
-
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Compute Encoder"),
-            });
-
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-            });
-
-            compute_pass.set_pipeline(&self.compute_pipeline);
-            compute_pass.set_bind_group(0, &self.world_bind_group, &[]);
-            compute_pass.set_bind_group(1, &self.particle_bind_group, &[]);
-            compute_pass.set_bind_group(2, &self.attraction_matrix_bind_group, &[]);
-            compute_pass.dispatch_workgroups(
-                (self.world.num_particles as f32 / 64.0).ceil() as u32,
-                1,
-                1,
-            );
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-    }
-
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
 
         let view = output
@@ -619,11 +388,10 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.world_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.particle_buffer.slice(..));
-            render_pass.draw(0..VERTICES.len() as u32, 0..self.particles.len() as u32);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw(0..VERTICES.len() as u32, 0..self.instances.len() as u32);
 
             self.gui.render(&self.device, &self.queue, &mut render_pass);
         }
@@ -636,8 +404,44 @@ impl State {
     }
 }
 
-pub async fn run() {
+pub trait Simulation<GUI: Gui> {
+    fn new() -> Self;
+    fn update(&mut self);
+
+    fn gui(&mut self, gui: GUI) where GUI : Gui;
+
+    /// This function requires you to convert however you store your particles/bodies into a format that the renderer can understand.  
+    fn convert(&self) -> Vec<Instance>;
+}
+
+pub fn run<SIM, GUI>()
+where
+    SIM: Simulation<GUI>,
+    GUI: Gui + 'static,
+{
     env_logger::init();
+
+    let (tx, rx) = channel();
+    let (ty, ry) = channel();
+    thread::spawn(move || {
+        let mut frames = 0;
+        let mut start_time = Instant::now();
+        let mut simulation = SIM::new();
+        loop {
+            simulation.update();
+            tx.send(simulation.convert()).unwrap();
+            while let Ok(gui) = ry.try_recv() {
+                simulation.gui(gui);
+            }
+
+            frames += 1;
+            if start_time.elapsed() > Duration::from_secs(1) {
+                println!("TPS: {}", frames);
+                start_time = Instant::now();
+                frames = 0;
+            }
+        }
+    });
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -646,7 +450,7 @@ pub async fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let mut state = State::new(window).await;
+    let mut state = pollster::block_on(State::<GUI>::new(window));
 
     let mut frames = 0;
     let mut start_time = Instant::now();
@@ -678,7 +482,13 @@ pub async fn run() {
                 _ => {}
             },
             Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                pollster::block_on(state.update());
+                ty.send(state.gui.gui.clone()).unwrap();
+                if let Ok(mut instances) = rx.try_recv() {
+                    while let Ok(temp) = rx.try_recv() {
+                        instances = temp;
+                    }
+                    state.set_instances(instances);
+                }
                 match state.render() {
                     Ok(_) => {}
                     // Reconfigure the surface if lost
@@ -692,7 +502,7 @@ pub async fn run() {
             Event::MainEventsCleared => {
                 frames += 1;
                 if start_time.elapsed() > Duration::from_secs(1) {
-                    println!("{}", frames);
+                    println!("FPS: {}", frames);
                     start_time = Instant::now();
                     frames = 0;
                 }
@@ -704,36 +514,4 @@ pub async fn run() {
             _ => {}
         }
     });
-}
-
-struct Grid {
-    cells: Vec<Vec<u32>>,
-    resolution: usize,
-    width: f32,
-}
-
-impl Grid {
-    fn new(min_cell_width: f32, width: f32) -> Self {
-        let resolution = ((width / min_cell_width).floor() as usize).max(1);
-
-        Self {
-            cells: vec![Vec::new(); resolution * resolution],
-            resolution,
-            width,
-        }
-    }
-
-    fn insert(&mut self, index: u32, position: Vec2) {
-        let pos = position / self.width * self.resolution as f32;
-        let x = pos.x.floor() as usize;
-        let y = pos.y.floor() as usize;
-
-        for i in -1..=1 {
-            for j in -1..=1 {
-                let x = (x as i32 + i) as usize % self.resolution;
-                let y = (y as i32 + j) as usize % self.resolution;
-                self.cells[x + y * self.resolution].push(index);
-            }
-        }
-    }
 }
