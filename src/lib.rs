@@ -1,5 +1,4 @@
 use std::{
-    sync::mpsc::channel,
     thread,
     time::{Duration, Instant},
 };
@@ -12,31 +11,53 @@ use ultraviolet::Vec2;
 use winit::{
     dpi::PhysicalSize,
     event::*,
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
+    platform::windows::EventLoopBuilderExtWindows,
     window::{Window, WindowBuilder},
 };
 
 use wgpu::util::DeviceExt;
 use winit_input_helper::WinitInputHelper;
 
-mod gui;
+pub mod gui;
+pub use egui;
+pub use wgpu;
+pub use winit;
+pub use winit_input_helper;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct Camera {
-    position: [f32; 2],
+#[derive(Copy, Clone, Debug)]
+pub struct View {
+    position: Vec2,
     scale: f32,
     aspect: f32,
 }
 
+unsafe impl Pod for View {}
+unsafe impl Zeroable for View {}
+
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
-struct Vertex {
-    position: Vec2,
+#[derive(Clone, Copy)]
+pub struct Vertex {
+    pub pos: Vec2,
+    pub color: u32,
 }
 
 unsafe impl Pod for Vertex {}
 unsafe impl Zeroable for Vertex {}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -49,41 +70,13 @@ pub struct Instance {
 unsafe impl Pod for Instance {}
 unsafe impl Zeroable for Instance {}
 
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
-
-    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
-    }
-}
-
-const VERTICES: [Vertex; 3] = [
-    Vertex {
-        position: Vec2::new(0.0, 2.0),
-    },
-    Vertex {
-        position: Vec2::new(-1.73205080757, -1.0),
-    },
-    Vertex {
-        position: Vec2::new(1.73205080757, -1.0),
-    },
-];
-
 impl Instance {
     const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32, 3 => Sint32];
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Uint32];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Instance>() as wgpu::BufferAddress,
-            // We need to switch from using a step mode of Vertex to Instance
-            // This means that our shaders will only change to use the next
-            // instance when the shader starts processing a new instance
+            array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &Self::ATTRIBS,
         }
@@ -98,20 +91,24 @@ struct State<GUI: Gui> {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     input: WinitInputHelper,
+    vertices: Vec<Vertex>,
+    vertex_buffer: wgpu::Buffer,
     instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    line_render_pipeline: wgpu::RenderPipeline,
+    circle_render_pipeline: wgpu::RenderPipeline,
+    view: View,
+    view_buffer: wgpu::Buffer,
+    view_bind_group: wgpu::BindGroup,
 
     gui: GuiHandler<GUI>,
 }
 
 impl<GUI: Gui> State<GUI> {
     // Creating some of the wgpu types requires async code
-    async fn new(window: Window) -> Self {
+    async fn new(window: Window, config: Config) -> Self {
+        let in_config = config;
+
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -139,7 +136,7 @@ impl<GUI: Gui> State<GUI> {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
+                    features: wgpu::Features::CONSERVATIVE_RASTERIZATION,
                     // WebGL doesn't support all of wgpu's features, so if
                     // we're building for the web we'll have to disable some.
                     limits: if cfg!(target_arch = "wasm32") {
@@ -162,7 +159,7 @@ impl<GUI: Gui> State<GUI> {
             .formats
             .iter()
             .copied()
-            .filter(|f| f.describe().srgb)
+            .filter(|f| f.is_srgb())
             .next()
             .unwrap_or(surface_caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
@@ -176,25 +173,26 @@ impl<GUI: Gui> State<GUI> {
         };
         surface.configure(&device, &config);
 
-        let gui = GuiHandler::new(&window, config.format, &device, &queue);
+        let gui = GuiHandler::new(&window, config.format, &device);
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let circle_shader = device.create_shader_module(wgpu::include_wgsl!("circle_shader.wgsl"));
+        let line_shader = device.create_shader_module(wgpu::include_wgsl!("line_shader.wgsl"));
 
-        let camera = Camera {
-            position: [0.; 2],
-            scale: 500.0,
-            aspect: config.width as f32 / config.height as f32,
+        let view = View {
+            position: Vec2::zero(),
+            scale: in_config.view_size,
+            aspect: config.height as f32 / config.width as f32,
         };
 
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera]),
+        let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("View Buffer"),
+            contents: bytemuck::cast_slice(&[view]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group_layout =
+        let view_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Camera Bind Group Layout"),
+                label: Some("View Bind Group Layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
@@ -207,32 +205,70 @@ impl<GUI: Gui> State<GUI> {
                 }],
             });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
-            layout: &camera_bind_group_layout,
+        let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("View Bind Group"),
+            layout: &view_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_buffer.as_entire_binding(),
+                resource: view_buffer.as_entire_binding(),
             }],
         });
 
-        let render_pipeline_layout =
+        let line_render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&view_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        
+        let line_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&line_render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &line_shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &line_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                front_face: wgpu::FrontFace::Ccw,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        let circle_render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&view_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let circle_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&circle_render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &circle_shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc(), Instance::desc()],
+                buffers: &[Instance::desc()],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &circle_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -250,7 +286,7 @@ impl<GUI: Gui> State<GUI> {
                 // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
                 // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
+                conservative: true,
             },
             depth_stencil: None, // 1.
             multisample: wgpu::MultisampleState {
@@ -261,10 +297,15 @@ impl<GUI: Gui> State<GUI> {
             multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vertices = Vec::new();
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST,
+            size: 1 << 20,
+            mapped_at_creation: false,
         });
 
         let instances = Vec::new();
@@ -274,7 +315,7 @@ impl<GUI: Gui> State<GUI> {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-            size: 1<<20,
+            size: 1 << 20,
             mapped_at_creation: false,
         });
 
@@ -288,13 +329,15 @@ impl<GUI: Gui> State<GUI> {
             config,
             size,
             input,
+            vertices,
+            vertex_buffer,
             instances,
             instance_buffer,
-            render_pipeline,
-            vertex_buffer,
-            camera,
-            camera_buffer,
-            camera_bind_group,
+            line_render_pipeline,
+            circle_render_pipeline,
+            view,
+            view_buffer,
+            view_bind_group,
             gui,
         }
     }
@@ -310,8 +353,17 @@ impl<GUI: Gui> State<GUI> {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
 
-            self.camera.aspect = new_size.width as f32 / new_size.height as f32;
+            self.view.aspect = new_size.height as f32 / new_size.width as f32;
         }
+    }
+
+    fn set_vertices(&mut self, vertices: Vec<Vertex>) {
+        self.vertices = vertices;
+        self.queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&self.vertices),
+        );
     }
 
     fn set_instances(&mut self, instances: Vec<Instance>) {
@@ -324,34 +376,42 @@ impl<GUI: Gui> State<GUI> {
     }
 
     fn input(&mut self, event: &Event<()>) {
-        if self.input.update(event) {
-            // Zoom relative to mouse position
+        // If gui doesn't want exclusive access and it's time to update
+        if !self.gui.handle_event(event) && self.input.update(event) {
+            self.gui.gui.input(&self.input);
+            // Zoom
             if let Some((mx, my)) = self.input.mouse() {
-                let scroll_diff = self.input.scroll_diff() * 0.1;
+                // Scroll steps to double/halve the scale
+                let steps = 5.0;
 
-                let x = mx / self.size.width as f32 * 2.0 - 1.0;
-                let y = my / self.size.width as f32 * 2.0 - self.camera.aspect.recip();
+                // Modify input
+                let zoom = (-self.input.scroll_diff() / steps).exp2();
 
-                self.camera.position[0] += x * self.camera.scale * scroll_diff;
-                self.camera.position[1] -= y * self.camera.scale * scroll_diff;
+                // Screen space -> view space
+                let target = Vec2::new(
+                    mx * 2.0 - self.size.width as f32,
+                    self.size.height as f32 - my * 2.0,
+                ) / self.size.height as f32;
 
-                self.camera.scale *= 1.0 - scroll_diff;
+                // Move view position based on target
+                self.view.position += target * self.view.scale * (1.0 - zoom);
+
+                // Zoom
+                self.view.scale *= zoom;
             }
 
-            // Move camera
-            let (mdx, mdy) = self.input.mouse_diff();
+            // Grab
             if self.input.mouse_held(2) {
-                self.camera.position[0] -= mdx / self.size.width as f32 * self.camera.scale * 2.0;
-                self.camera.position[1] += mdy / self.size.width as f32 * self.camera.scale * 2.0;
+                let (mdx, mdy) = self.input.mouse_diff();
+                self.view.position.x -= mdx / self.size.height as f32 * self.view.scale * 2.0;
+                self.view.position.y += mdy / self.size.height as f32 * self.view.scale * 2.0;
             }
         }
-        self.gui.input(&self.window, event);
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        self.gui.update(&self.window);
         self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera]));
+            .write_buffer(&self.view_buffer, 0, bytemuck::cast_slice(&[self.view]));
 
         let output = self.surface.get_current_texture()?;
 
@@ -364,6 +424,10 @@ impl<GUI: Gui> State<GUI> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+
+        let (clipped_primitives, screen_descriptor) =
+            self.gui
+                .render(&self.device, &self.queue, &self.window, &mut encoder);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -387,13 +451,19 @@ impl<GUI: Gui> State<GUI> {
                 depth_stencil_attachment: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_pipeline(&self.line_render_pipeline);
+            render_pass.set_bind_group(0, &self.view_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.draw(0..VERTICES.len() as u32, 0..self.instances.len() as u32);
+            render_pass.draw(0..self.vertices.len() as u32, 0..1);
 
-            self.gui.render(&self.device, &self.queue, &mut render_pass);
+            render_pass.set_pipeline(&self.circle_render_pipeline);
+            render_pass.set_bind_group(0, &self.view_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+            render_pass.draw(0..3, 0..self.instances.len() as u32);
+
+            self.gui
+                .renderer
+                .render(&mut render_pass, &clipped_primitives, &screen_descriptor);
         }
 
         // submit will accept anything that implements IntoIter
@@ -404,114 +474,110 @@ impl<GUI: Gui> State<GUI> {
     }
 }
 
-pub trait Simulation<GUI: Gui> {
+pub trait Simulation<GUI>
+where
+    GUI: Gui,
+{
     fn new() -> Self;
-    fn update(&mut self);
-
-    fn gui(&mut self, gui: GUI) where GUI : Gui;
-
-    /// This function requires you to convert however you store your particles/bodies into a format that the renderer can understand.  
-    fn convert(&self) -> Vec<Instance>;
+    fn update(&mut self) {}
+    fn convert(&self) {}
 }
 
-pub fn run<SIM, GUI>()
+#[derive(Clone, Copy)]
+pub struct Config {
+    pub tps_cap: Option<u32>,
+    pub view_size: f32,
+    pub window_size: PhysicalSize<u32>,
+}
+
+pub fn run<SIM, GUI>(config: Config)
 where
     SIM: Simulation<GUI>,
     GUI: Gui + 'static,
 {
     env_logger::init();
 
-    let (tx, rx) = channel();
-    let (ty, ry) = channel();
     thread::spawn(move || {
-        let mut frames = 0;
-        let mut start_time = Instant::now();
-        let mut simulation = SIM::new();
-        loop {
-            simulation.update();
-            tx.send(simulation.convert()).unwrap();
-            while let Ok(gui) = ry.try_recv() {
-                simulation.gui(gui);
-            }
+        let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
+        let window = WindowBuilder::new()
+            .with_title("Quarkstrom")
+            .with_inner_size(config.window_size)
+            .build(&event_loop)
+            .unwrap();
 
-            frames += 1;
-            if start_time.elapsed() > Duration::from_secs(1) {
-                println!("TPS: {}", frames);
-                start_time = Instant::now();
-                frames = 0;
-            }
-        }
-    });
+        let mut state = pollster::block_on(State::<GUI>::new(window, config));
 
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Quarkstrom")
-        .with_inner_size(PhysicalSize::new(1280, 720))
-        .build(&event_loop)
-        .unwrap();
+        event_loop.run(move |event, _, control_flow| {
+            state.input(&event);
 
-    let mut state = pollster::block_on(State::<GUI>::new(window));
+            match event {
+                Event::WindowEvent {
+                    ref event,
+                    window_id,
+                } if window_id == state.window().id() => match event {
+                    WindowEvent::CloseRequested
+                    | WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state: ElementState::Pressed,
+                                virtual_keycode: Some(VirtualKeyCode::Escape),
+                                ..
+                            },
+                        ..
+                    } => *control_flow = ControlFlow::Exit,
+                    WindowEvent::Resized(physical_size) => {
+                        state.resize(*physical_size);
+                    }
+                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                        state.resize(**new_inner_size);
+                    }
+                    _ => {}
+                },
+                Event::RedrawRequested(window_id) if window_id == state.window().id() => {
+                    let (instances, vertices) = state.gui.gui.render();
+                    if let Some(i) = instances {
+                        state.set_instances(i);
+                    }
+                    if let Some(v) = vertices {
+                        state.set_vertices(v);
+                    }
 
-    let mut frames = 0;
-    let mut start_time = Instant::now();
-
-    event_loop.run(move |event, _, control_flow| {
-        state.input(&event);
-
-        match event {
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == state.window().id() => match event {
-                WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    input:
-                        KeyboardInput {
-                            state: ElementState::Pressed,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => *control_flow = ControlFlow::Exit,
-                WindowEvent::Resized(physical_size) => {
-                    state.resize(*physical_size);
+                    match state.render() {
+                        Ok(_) => {}
+                        // Reconfigure the surface if lost
+                        Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                        // The system is out of memory, we should probably quit
+                        Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
+                        // All other errors (Outdated, Timeout) should be resolved by the next frame
+                        Err(e) => eprintln!("{:?}", e),
+                    }
                 }
-                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                    state.resize(**new_inner_size);
+                Event::MainEventsCleared => {
+                    // RedrawRequested will only trigger once, unless we manually
+                    // request it.
+                    state.window().request_redraw();
                 }
                 _ => {}
-            },
-            Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                ty.send(state.gui.gui.clone()).unwrap();
-                if let Ok(mut instances) = rx.try_recv() {
-                    while let Ok(temp) = rx.try_recv() {
-                        instances = temp;
-                    }
-                    state.set_instances(instances);
-                }
-                match state.render() {
-                    Ok(_) => {}
-                    // Reconfigure the surface if lost
-                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                    // The system is out of memory, we should probably quit
-                    Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                    // All other errors (Outdated, Timeout) should be resolved by the next frame
-                    Err(e) => eprintln!("{:?}", e),
-                }
             }
-            Event::MainEventsCleared => {
-                frames += 1;
-                if start_time.elapsed() > Duration::from_secs(1) {
-                    println!("FPS: {}", frames);
-                    start_time = Instant::now();
-                    frames = 0;
-                }
-
-                // RedrawRequested will only trigger once, unless we manually
-                // request it.
-                state.window().request_redraw();
-            }
-            _ => {}
-        }
+        });
     });
+
+    let desired_frame_time = config
+        .tps_cap
+        .map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
+
+    // Init
+    let mut simulation = SIM::new();
+
+    loop {
+        let frame_timer = Instant::now();
+
+        simulation.update();
+        simulation.convert();
+
+        // Cap tps
+        if let Some(desired_frame_time) = desired_frame_time {
+            while frame_timer.elapsed() < desired_frame_time {}
+        }
+    }
 }
