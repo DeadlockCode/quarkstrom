@@ -638,7 +638,7 @@ impl quarkstrom::Simulation<Gui> for Simulation {
         }
     }
 
-    fn convert(&self) {
+    fn convert(&mut self) {
         *PARTICLES.lock() = Some(self.particles.clone());
     }
 }
