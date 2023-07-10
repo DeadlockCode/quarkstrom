@@ -480,7 +480,7 @@ where
 {
     fn new() -> Self;
     fn update(&mut self) {}
-    fn convert(&self) {}
+    fn convert(&mut self) {}
 }
 
 #[derive(Clone, Copy)]
@@ -577,6 +577,10 @@ where
 
         // Cap tps
         if let Some(desired_frame_time) = desired_frame_time {
+            // Could've been the following line of code,
+            // "thread::sleep(desired_frame_time - frame_timer.elapsed());"
+            // but sleeping on windows (at least) is extremely unpredictable.
+            // Therefore we have to waste resources.  
             while frame_timer.elapsed() < desired_frame_time {}
         }
     }
