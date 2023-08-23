@@ -1,28 +1,13 @@
-use egui::ClippedPrimitive;
+use egui::{ClippedPrimitive, Context};
 use egui_wgpu::renderer::ScreenDescriptor;
-use winit_input_helper::WinitInputHelper;
 
-use crate::{Instance, Vertex};
-
-pub trait Gui: Send + Clone {
-    fn new() -> Self;
-    #[allow(unused_variables)]
-    fn gui(&mut self, ctx: &egui::Context) {}
-    #[allow(unused_variables)]
-    fn input(&mut self, input: &WinitInputHelper) {}
-    #[allow(unused_variables)]
-    fn render(&mut self) -> (Option<Vec<Instance>>, Option<Vec<Vertex>>) {(None, None)}
-}
-
-pub struct GuiHandler<GUI: Gui> {
+pub struct GuiHandler {
     ctx: egui::Context,
     pub renderer: egui_wgpu::Renderer,
     state: egui_winit::State,
-
-    pub gui: GUI,
 }
 
-impl<GUI: Gui> GuiHandler<GUI> {
+impl GuiHandler {
     pub fn new(
         window: &winit::window::Window,
         format: wgpu::TextureFormat,
@@ -37,8 +22,6 @@ impl<GUI: Gui> GuiHandler<GUI> {
             ctx,
             renderer,
             state,
-
-            gui: GUI::new(),
         }
     }
 
@@ -58,6 +41,7 @@ impl<GUI: Gui> GuiHandler<GUI> {
         queue: &wgpu::Queue,
         window: &winit::window::Window,
         encoder: &mut wgpu::CommandEncoder,
+        gui: &mut dyn FnMut(&Context),
     ) -> (Vec<ClippedPrimitive>, ScreenDescriptor) {
         let screen_descriptor = {
             let size = window.inner_size();
@@ -68,9 +52,9 @@ impl<GUI: Gui> GuiHandler<GUI> {
         };
 
         let raw_input: egui::RawInput = self.state.take_egui_input(window);
-        let full_output = self.ctx.run(raw_input, |ctx| {
-            self.gui.gui(ctx);
-        });
+        self.ctx.begin_frame(raw_input);
+        gui(&self.ctx);
+        let full_output = self.ctx.end_frame();
 
         self.state
             .handle_platform_output(window, &self.ctx, full_output.platform_output);
