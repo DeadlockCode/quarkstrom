@@ -1,8 +1,8 @@
-use std::f32::consts::TAU;
+use std::{f32::consts::TAU, time::{Instant, Duration}};
 
 use egui::{mutex::Mutex, Color32, Response, Ui};
 use fastrand;
-use quarkstrom::{self, run, Config};
+use quarkstrom::{self, xy};
 use ultraviolet::Vec2;
 use winit::dpi::PhysicalSize;
 
@@ -12,12 +12,30 @@ static PARTICLES: Lazy<Mutex<Option<Vec<Particle>>>> = Lazy::new(|| Mutex::new(N
 static GUI: Lazy<Mutex<Vec<Gui>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 fn main() {
-    let config = Config {
-        tps_cap: Some(60),
+    let config = xy::Config {
         view_size: 512.0,
         window_size: PhysicalSize::new(1280, 720),
     };
-    run::<Simulation, Gui>(config);
+    xy::run::<Gui>(config);
+
+    let tps_cap: Option<u32> = None;
+    let desired_frame_time = tps_cap
+        .map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
+
+    // Init
+    let mut simulation = Simulation::new();
+
+    loop {
+        let frame_timer = Instant::now();
+
+        simulation.update();
+        simulation.convert();
+
+        // Cap tps
+        if let Some(desired_frame_time) = desired_frame_time {
+            while frame_timer.elapsed() < desired_frame_time {}
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -41,7 +59,7 @@ struct Gui {
     texture: Option<egui::TextureHandle>,
 }
 
-impl quarkstrom::Gui for Gui {
+impl quarkstrom::xy::Renderer for Gui {
     fn new() -> Self {
         Self {
             restart: false,
@@ -218,17 +236,16 @@ impl quarkstrom::Gui for Gui {
         GUI.lock().push(self.clone());
     }
 
-    fn render(&mut self) -> (Option<Vec<quarkstrom::Instance>>, Option<Vec<quarkstrom::Vertex>>) {
-        if let Some(particles) = PARTICLES.lock().clone() {
-            let mut result = particles.iter()
-                .map(|particle| quarkstrom::Instance {
-                    position: particle.pos,
-                    radius: 1.0,
-                    color: hue2rgb(particle.typ as f32 / self.types as f32),
-                })
-                .collect::<Vec<_>>();
+    fn input(&mut self, input: &winit_input_helper::WinitInputHelper) {
+        
+    }
 
-            for i in 0..result.len() {
+    fn render(&mut self, ctx: &mut xy::RenderContext) {
+        if let Some(particles) = PARTICLES.lock().clone() {
+            ctx.clear();
+            for particle in particles {
+                ctx.draw_circle(particle.pos, 1.0, hue2rgb(particle.typ as f32 / self.types as f32));
+                
                 match self.boundary {
                     Boundary::Square(side) => {
                         for x in -1..=1 {
@@ -236,43 +253,25 @@ impl quarkstrom::Gui for Gui {
                                 if x == 0 && y == 0 {
                                     continue;
                                 }
-                                result.push(quarkstrom::Instance {
-                                    position: result[i].position
-                                        + Vec2::new(side * x as f32, side * y as f32),
-                                    radius: 1.0,
-                                    color: 0x888888,
-                                });
+                                ctx.draw_circle(particle.pos + Vec2::new(side * x as f32, side * y as f32), 1.0, 0x888888);
                             }
                         }
                     }
                     Boundary::ReflectedCircle(radius) => {
-                        if result[i].position != Vec2::zero() {
-                            result.push(quarkstrom::Instance {
-                                position: particles[i].pos
-                                    * (1.0 - particles[i].pos.mag().recip() * (2.0 * radius)),
-                                radius: 1.0,
-                                color: 0x888888,
-                            });
+                        if particle.pos != Vec2::zero() {
+                            ctx.draw_circle(particle.pos * (1.0 - particle.pos.mag().recip() * (2.0 * radius)), 1.0, 0x888888);
                         }
                     }
                     Boundary::InverseCircle(radius) => {
-                        let mag_sq = result[i].position.mag_sq();
+                        let mag_sq = particle.pos.mag_sq();
                         if mag_sq > 0.1 * radius {
-                            result.push(quarkstrom::Instance {
-                                position: -result[i].position / mag_sq * radius * radius,
-                                radius: 1.0 / mag_sq * radius * radius,
-                                color: 0x888888,
-                            });
+                            ctx.draw_circle(-particle.pos / mag_sq * radius * radius, 1.0 / mag_sq * radius * radius, 0x888888);
                         }
                     }
                     Boundary::None => {}
                 }
             }
-
-            return (Some(result), None);
         }
-        return (None, None);
-        
     }
 }
 
@@ -421,9 +420,7 @@ impl Simulation {
             }
         }
     }
-}
-
-impl quarkstrom::Simulation<Gui> for Simulation {
+    
     fn new() -> Self {
         let world = World {
             boundary: Boundary::Square(500.0),

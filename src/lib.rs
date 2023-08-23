@@ -1,15 +1,17 @@
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
+pub mod gui;
+pub use egui;
+pub use wgpu;
+pub use winit;
+pub use winit_input_helper;
+
+use std::thread;
 
 use bytemuck::{Pod, Zeroable};
 
-pub use gui::Gui;
-use gui::GuiHandler;
+use crate::gui::GuiHandler;
 use ultraviolet::Vec2;
 use winit::{
-    dpi::PhysicalSize,
+    dpi::{PhysicalSize, PhysicalPosition},
     event::*,
     event_loop::{ControlFlow, EventLoopBuilder},
     platform::windows::EventLoopBuilderExtWindows,
@@ -19,14 +21,8 @@ use winit::{
 use wgpu::util::DeviceExt;
 use winit_input_helper::WinitInputHelper;
 
-pub mod gui;
-pub use egui;
-pub use wgpu;
-pub use winit;
-pub use winit_input_helper;
-
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct View {
     position: Vec2,
     scale: f32,
@@ -83,7 +79,7 @@ impl Instance {
     }
 }
 
-struct State<GUI: Gui> {
+struct State {
     window: Window,
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -91,9 +87,9 @@ struct State<GUI: Gui> {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     input: WinitInputHelper,
-    vertices: Vec<Vertex>,
+    vertices: u32,
     vertex_buffer: wgpu::Buffer,
-    instances: Vec<Instance>,
+    instances: u32,
     instance_buffer: wgpu::Buffer,
     line_render_pipeline: wgpu::RenderPipeline,
     circle_render_pipeline: wgpu::RenderPipeline,
@@ -101,10 +97,10 @@ struct State<GUI: Gui> {
     view_buffer: wgpu::Buffer,
     view_bind_group: wgpu::BindGroup,
 
-    gui: GuiHandler<GUI>,
+    gui: GuiHandler,
 }
 
-impl<GUI: Gui> State<GUI> {
+impl State {
     // Creating some of the wgpu types requires async code
     async fn new(window: Window, config: Config) -> Self {
         let in_config = config;
@@ -114,7 +110,7 @@ impl<GUI: Gui> State<GUI> {
         // The instance is a handle to our GPU
         // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::VULKAN,
             dx12_shader_compiler: Default::default(),
         });
 
@@ -162,12 +158,13 @@ impl<GUI: Gui> State<GUI> {
             .filter(|f| f.is_srgb())
             .next()
             .unwrap_or(surface_caps.formats[0]);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: wgpu::PresentMode::AutoVsync, // Could be surface_caps.present_modes[0] but Intel Arc A770 go brrr.
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
@@ -297,25 +294,25 @@ impl<GUI: Gui> State<GUI> {
             multiview: None,
         });
 
-        let vertices = Vec::new();
+        let vertices = 0;
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-            size: 1 << 20,
+            size: 1 << 24,
             mapped_at_creation: false,
         });
 
-        let instances = Vec::new();
+        let instances = 0;
 
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-            size: 1 << 20,
+            size: 1 << 24,
             mapped_at_creation: false,
         });
 
@@ -357,28 +354,27 @@ impl<GUI: Gui> State<GUI> {
         }
     }
 
-    fn set_vertices(&mut self, vertices: Vec<Vertex>) {
-        self.vertices = vertices;
+    fn set_vertices(&mut self, vertices: &Vec<Vertex>) {
+        self.vertices = vertices.len() as u32;
         self.queue.write_buffer(
             &self.vertex_buffer,
             0,
-            bytemuck::cast_slice(&self.vertices),
+            bytemuck::cast_slice(vertices),
         );
     }
 
-    fn set_instances(&mut self, instances: Vec<Instance>) {
-        self.instances = instances;
+    fn set_instances(&mut self, instances: &Vec<Instance>) {
+        self.instances = instances.len() as u32;
         self.queue.write_buffer(
             &self.instance_buffer,
             0,
-            bytemuck::cast_slice(&self.instances),
+            bytemuck::cast_slice(instances),
         );
     }
 
     fn input(&mut self, event: &Event<()>) {
         // If gui doesn't want exclusive access and it's time to update
         if !self.gui.handle_event(event) && self.input.update(event) {
-            self.gui.gui.input(&self.input);
             // Zoom
             if let Some((mx, my)) = self.input.mouse() {
                 // Scroll steps to double/halve the scale
@@ -409,7 +405,7 @@ impl<GUI: Gui> State<GUI> {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self, gui: &mut dyn FnMut(&egui::Context)) -> Result<(), wgpu::SurfaceError> {
         self.queue
             .write_buffer(&self.view_buffer, 0, bytemuck::cast_slice(&[self.view]));
 
@@ -427,7 +423,7 @@ impl<GUI: Gui> State<GUI> {
 
         let (clipped_primitives, screen_descriptor) =
             self.gui
-                .render(&self.device, &self.queue, &self.window, &mut encoder);
+                .render(&self.device, &self.queue, &self.window, &mut encoder, gui);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -454,12 +450,12 @@ impl<GUI: Gui> State<GUI> {
             render_pass.set_pipeline(&self.line_render_pipeline);
             render_pass.set_bind_group(0, &self.view_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..self.vertices.len() as u32, 0..1);
+            render_pass.draw(0..self.vertices, 0..1);
 
             render_pass.set_pipeline(&self.circle_render_pipeline);
             render_pass.set_bind_group(0, &self.view_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-            render_pass.draw(0..3, 0..self.instances.len() as u32);
+            render_pass.draw(0..3, 0..self.instances);
 
             self.gui
                 .renderer
@@ -474,38 +470,94 @@ impl<GUI: Gui> State<GUI> {
     }
 }
 
-pub trait Simulation<GUI>
-where
-    GUI: Gui,
-{
-    fn new() -> Self;
-    fn update(&mut self) {}
-    fn convert(&mut self) {}
+#[derive(Clone, Copy)]
+pub enum WindowMode {
+    Windowed(u32, u32),
+    Fullscreen,
 }
 
 #[derive(Clone, Copy)]
 pub struct Config {
-    pub tps_cap: Option<u32>,
     pub view_size: f32,
-    pub window_size: PhysicalSize<u32>,
+    pub window_mode: WindowMode,
 }
 
-pub fn run<SIM, GUI>(config: Config)
+pub struct RenderContext {
+    circles: Vec<Instance>,
+    lines: Vec<Vertex>,
+}
+
+impl RenderContext {
+    fn new() -> Self {
+        Self {
+            circles: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+
+    pub fn clear_lines(&mut self) {
+        self.lines.clear();
+    }
+
+    pub fn clear_circles(&mut self) {
+        self.circles.clear();
+    }
+
+    pub fn draw_circle(&mut self, position: Vec2, radius: f32, color: u32) {
+        self.circles.push(Instance { position, radius, color });
+    }
+
+    pub fn draw_line(&mut self, src: Vec2, dst: Vec2, color: u32) {
+        self.lines.push(Vertex { pos: src, color });
+        self.lines.push(Vertex { pos: dst, color });
+    }
+}
+
+pub trait Renderer {
+    fn new() -> Self;
+    fn input(&mut self, input: &WinitInputHelper);
+    fn render(&mut self, ctx: &mut RenderContext);
+    fn gui(&mut self, ctx: &egui::Context);
+}
+
+pub fn run<R>(config: Config)
 where
-    SIM: Simulation<GUI>,
-    GUI: Gui + 'static,
+    R: Renderer + 'static,
 {
     env_logger::init();
 
     thread::spawn(move || {
         let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
-        let window = WindowBuilder::new()
-            .with_title("Quarkstrom")
-            .with_inner_size(config.window_size)
+
+        let mut builder = WindowBuilder::new()
+            .with_title("Quarkstrom");
+
+        match config.window_mode {
+            WindowMode::Windowed(width, height) =>  {
+                let monitor = event_loop.primary_monitor().unwrap();
+                let size = monitor.size();
+                let position = PhysicalPosition::new(
+                    (size.width - width) as i32 / 2, 
+                    (size.height - height) as i32 / 2
+                );
+                builder = builder
+                    .with_inner_size(PhysicalSize::new(width, height))
+                    .with_position(position);
+            },
+            WindowMode::Fullscreen => {
+                builder = builder
+                    .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            },
+        }
+
+
+        let window = builder
             .build(&event_loop)
             .unwrap();
 
-        let mut state = pollster::block_on(State::<GUI>::new(window, config));
+        let mut state = pollster::block_on(State::new(window, config));
+        let mut renderer = R::new();
+        let mut render_ctx = RenderContext::new();
 
         event_loop.run(move |event, _, control_flow| {
             state.input(&event);
@@ -534,15 +586,13 @@ where
                     _ => {}
                 },
                 Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                    let (instances, vertices) = state.gui.gui.render();
-                    if let Some(i) = instances {
-                        state.set_instances(i);
-                    }
-                    if let Some(v) = vertices {
-                        state.set_vertices(v);
-                    }
+                    renderer.input(&state.input);
+                    renderer.render(&mut render_ctx);
+                    // TODO: Could be in a need to set basis (optimization)
+                    state.set_instances(&render_ctx.circles);
+                    state.set_vertices(&render_ctx.lines);
 
-                    match state.render() {
+                    match state.render(&mut |ctx| renderer.gui(ctx)) {
                         Ok(_) => {}
                         // Reconfigure the surface if lost
                         Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
@@ -561,27 +611,4 @@ where
             }
         });
     });
-
-    let desired_frame_time = config
-        .tps_cap
-        .map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
-
-    // Init
-    let mut simulation = SIM::new();
-
-    loop {
-        let frame_timer = Instant::now();
-
-        simulation.update();
-        simulation.convert();
-
-        // Cap tps
-        if let Some(desired_frame_time) = desired_frame_time {
-            // Could've been the following line of code,
-            // "thread::sleep(desired_frame_time - frame_timer.elapsed());"
-            // but sleeping on windows (at least) is extremely unpredictable.
-            // Therefore we have to waste resources.  
-            while frame_timer.elapsed() < desired_frame_time {}
-        }
-    }
 }
