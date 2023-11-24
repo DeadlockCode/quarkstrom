@@ -2,9 +2,8 @@ use std::{f32::consts::TAU, time::{Instant, Duration}};
 
 use egui::{mutex::Mutex, Color32, Response, Ui};
 use fastrand;
-use quarkstrom::{self, xy};
+use quarkstrom;
 use ultraviolet::Vec2;
-use winit::dpi::PhysicalSize;
 
 use once_cell::sync::Lazy;
 
@@ -12,11 +11,11 @@ static PARTICLES: Lazy<Mutex<Option<Vec<Particle>>>> = Lazy::new(|| Mutex::new(N
 static GUI: Lazy<Mutex<Vec<Gui>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 fn main() {
-    let config = xy::Config {
+    let config = quarkstrom::Config {
         view_size: 512.0,
-        window_size: PhysicalSize::new(1280, 720),
+        window_mode: quarkstrom::WindowMode::Windowed(1280, 720),
     };
-    xy::run::<Gui>(config);
+    quarkstrom::run::<Gui>(config);
 
     let tps_cap: Option<u32> = None;
     let desired_frame_time = tps_cap
@@ -59,7 +58,7 @@ struct Gui {
     texture: Option<egui::TextureHandle>,
 }
 
-impl quarkstrom::xy::Renderer for Gui {
+impl quarkstrom::Renderer for Gui {
     fn new() -> Self {
         Self {
             restart: false,
@@ -240,9 +239,9 @@ impl quarkstrom::xy::Renderer for Gui {
         
     }
 
-    fn render(&mut self, ctx: &mut xy::RenderContext) {
+    fn render(&mut self, ctx: &mut quarkstrom::RenderContext) {
         if let Some(particles) = PARTICLES.lock().clone() {
-            ctx.clear();
+            ctx.clear_circles();
             for particle in particles {
                 ctx.draw_circle(particle.pos, 1.0, hue2rgb(particle.typ as f32 / self.types as f32));
                 

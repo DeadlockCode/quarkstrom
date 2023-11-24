@@ -67,13 +67,14 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    //if dot(in.local_space, in.local_space) > 1.0 {
-    //    discard;
-    //}
+    if dot(in.local_space, in.local_space) > 1.0 {
+        discard;
+    }
     return vec4<f32>(in.color, 1.0);
 }
 
-// Shading example
+// Version of fragment shader with lighting (diffuse + ambient)
+//
 // @fragment
 // fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 //     if dot(in.local_space, in.local_space) > 1.0 {
