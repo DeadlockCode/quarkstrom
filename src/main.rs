@@ -7,21 +7,23 @@ use ultraviolet::Vec2;
 
 use once_cell::sync::Lazy;
 
+// Used to communicate between the simulation and renderer threads
 static PARTICLES: Lazy<Mutex<Option<Vec<Particle>>>> = Lazy::new(|| Mutex::new(None));
-static GUI: Lazy<Mutex<Vec<Gui>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static RENDERER_CLONE: Lazy<Mutex<Vec<Renderer>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 fn main() {
     let config = quarkstrom::Config {
         view_size: 512.0,
         window_mode: quarkstrom::WindowMode::Windowed(1280, 720),
     };
-    quarkstrom::run::<Gui>(config);
+    quarkstrom::run::<Renderer>(config);
 
+    // Assign a value to cap the tps
     let tps_cap: Option<u32> = None;
+
     let desired_frame_time = tps_cap
         .map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
 
-    // Init
     let mut simulation = Simulation::new();
 
     loop {
@@ -46,7 +48,7 @@ enum Boundary {
 }
 
 #[derive(Clone)]
-struct Gui {
+struct Renderer {
     pub restart: bool,
     pub boundary: Boundary,
     pub num_particles: usize,
@@ -58,7 +60,7 @@ struct Gui {
     texture: Option<egui::TextureHandle>,
 }
 
-impl quarkstrom::Renderer for Gui {
+impl quarkstrom::Renderer for Renderer {
     fn new() -> Self {
         Self {
             restart: false,
@@ -128,14 +130,14 @@ impl quarkstrom::Renderer for Gui {
                 Boundary::Square(side) => {
                     ui.horizontal(|ui| {
                         let id = ui.label("Side: ").layer_id.id;
-                        ui.add(egui::Slider::new(side, 0.0..=1000.0))
+                        ui.add(egui::Slider::new(side, 0.001..=1000.0))
                             .labelled_by(id);
                     });
                 }
                 Boundary::InverseCircle(radius) | Boundary::ReflectedCircle(radius) => {
                     ui.horizontal(|ui| {
                         let id = ui.label("Side: ").layer_id.id;
-                        ui.add(egui::Slider::new(radius, 0.0..=500.0))
+                        ui.add(egui::Slider::new(radius, 0.001..=500.0))
                             .labelled_by(id);
                     });
                 }
@@ -232,21 +234,35 @@ impl quarkstrom::Renderer for Gui {
             }
         });
 
-        GUI.lock().push(self.clone());
+        RENDERER_CLONE.lock().push(self.clone());
     }
 
-    fn input(&mut self, input: &winit_input_helper::WinitInputHelper) {
-        
+    fn input(&mut self, _: &winit_input_helper::WinitInputHelper) {
+
     }
 
     fn render(&mut self, ctx: &mut quarkstrom::RenderContext) {
         if let Some(particles) = PARTICLES.lock().clone() {
             ctx.clear_circles();
+            ctx.clear_lines();
+
             for particle in particles {
                 ctx.draw_circle(particle.pos, 1.0, hue2rgb(particle.typ as f32 / self.types as f32));
                 
                 match self.boundary {
                     Boundary::Square(side) => {
+                        let s = side * 0.5;
+                        let p = [
+                            Vec2::new(s, s),
+                            Vec2::new(s, -s),
+                            Vec2::new(-s, -s),
+                            Vec2::new(-s, s),
+                        ];
+                        ctx.draw_line(p[0], p[1], 0x080808);
+                        ctx.draw_line(p[1], p[2], 0x080808);
+                        ctx.draw_line(p[2], p[3], 0x080808);
+                        ctx.draw_line(p[3], p[0], 0x080808);
+
                         for x in -1..=1 {
                             for y in -1..=1 {
                                 if x == 0 && y == 0 {
@@ -277,8 +293,6 @@ impl quarkstrom::Renderer for Gui {
 struct World {
     boundary: Boundary,
     types: u32,
-    #[allow(dead_code)]
-    universal_repulsive_strength: f32,
     interaction_distance: f32,
     interaction_multiplier: f32,
     velocity_half_life: f32,
@@ -340,24 +354,24 @@ impl Simulation {
     }
 
     fn gui(&mut self) {
-        while let Some(gui) = GUI.lock().pop() {
-            self.world.dt = 0.01 * gui.simulation_speed;
-            self.world.velocity_half_life = gui.velocity_half_life;
+        while let Some(renderer) = RENDERER_CLONE.lock().pop() {
+            self.world.dt = 0.01 * renderer.simulation_speed;
+            self.world.velocity_half_life = renderer.velocity_half_life;
 
-            self.world.boundary = gui.boundary;
-            if gui.types < self.world.types {
+            self.world.boundary = renderer.boundary;
+            if renderer.types < self.world.types {
                 for particle in &mut self.particles {
-                    if particle.typ >= gui.types {
-                        particle.typ = fastrand::u32(0..gui.types);
+                    if particle.typ >= renderer.types {
+                        particle.typ = fastrand::u32(0..renderer.types);
                     }
                 }
             }
-            self.world.types = gui.types;
-            self.attraction_matrix = gui.attraction_matrix.clone();
+            self.world.types = renderer.types;
+            self.attraction_matrix = renderer.attraction_matrix.clone();
 
             let len = self.particles.len();
-            if gui.num_particles > len {
-                for _ in len..gui.num_particles {
+            if renderer.num_particles > len {
+                for _ in len..renderer.num_particles {
                     let r = fastrand::f32();
                     let a = fastrand::f32() * TAU;
                     let d = match self.world.boundary {
@@ -375,14 +389,14 @@ impl Simulation {
                         typ,
                     });
                 }
-            } else if gui.num_particles < len {
-                for _ in gui.num_particles..len {
+            } else if renderer.num_particles < len {
+                for _ in renderer.num_particles..len {
                     self.particles.pop();
                 }
             }
 
-            if gui.restart {
-                self.restart(gui.num_particles);
+            if renderer.restart {
+                self.restart(renderer.num_particles);
             }
 
             for particle in &mut self.particles {
@@ -424,7 +438,6 @@ impl Simulation {
         let world = World {
             boundary: Boundary::Square(500.0),
             types: 0,
-            universal_repulsive_strength: 50.0,
             interaction_distance: 100.0,
             interaction_multiplier: 1.0,
             velocity_half_life: 0.04,
