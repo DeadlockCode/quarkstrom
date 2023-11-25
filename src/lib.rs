@@ -26,7 +26,8 @@ use winit_input_helper::WinitInputHelper;
 pub struct View {
     position: Vec2,
     scale: f32,
-    aspect: f32,
+    x: u16,
+    y: u16,
 }
 
 unsafe impl Pod for View {}
@@ -178,7 +179,8 @@ impl State {
         let view = View {
             position: Vec2::zero(),
             scale: in_config.view_size,
-            aspect: config.height as f32 / config.width as f32,
+            x: config.width as u16,
+            y: config.height as u16,
         };
 
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -350,7 +352,8 @@ impl State {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
 
-            self.view.aspect = new_size.height as f32 / new_size.width as f32;
+            self.view.x = new_size.width as u16;
+            self.view.y = new_size.height as u16;
         }
     }
 
