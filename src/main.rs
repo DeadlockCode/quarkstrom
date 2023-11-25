@@ -185,7 +185,7 @@ impl quarkstrom::Renderer for Renderer {
             });
 
             ui.horizontal(|ui| {
-                ui.label("Attraction Matric:");
+                ui.label("Attraction Matrix:");
                 if ui.button("Reset").clicked() {
                     self.attraction_matrix = vec![0.0; (self.types * self.types) as usize];
                 }
