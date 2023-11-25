@@ -8,7 +8,7 @@ var<private> VERTICES: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
 struct View {
     position: vec2<f32>,
     scale: f32,
-    aspect: f32,
+    xy: u32,
 };
 
 @group(0)
@@ -38,6 +38,10 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
 
+    let x = (view.xy       ) & 0xffffu;
+    let y = (view.xy >> 16u) & 0xffffu;
+    let aspect = f32(y) / f32(x);
+
     // Hexadecimal -> RGB 0-1
     let r = (instance.color >> 16u);
     let g = (instance.color >> 8u ) & 0xffu;
@@ -47,14 +51,26 @@ fn vs_main(
     // Local space
     let local_space = VERTICES[vertex.index];
 
+    // If the circle is smaller than a pixel, we need to snap it to the pixel grid and make it larger
+    // This ensures that the circle never becomes invisible when zooming out or when the circle is very small
+    var position = instance.position;
+    var radius = instance.radius;
+    if radius * f32(y) < 1.414214 * view.scale {
+        let one = ((position - view.position) / view.scale);
+        let two = (floor(one * f32(y)) + 0.5) / f32(y);
+        let three = two * view.scale + view.position;
+        position = three;
+        radius = view.scale / f32(y);
+    }
+
     // Object space -> World space
-    let world_space = local_space * instance.radius + instance.position;
+    let world_space = local_space * radius + position;
 
     // World space -> View space
     let view_space = (world_space - view.position) / view.scale;
 
     // View space -> Clip space
-    let clip_space = vec4<f32>(view_space.x * view.aspect, view_space.y, 0.0, 1.0);
+    let clip_space = vec4<f32>(view_space.x * aspect, view_space.y, 0.0, 1.0);
 
     // Return
     out.clip_space  = clip_space;
@@ -81,10 +97,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 //         discard;
 //     }
 //     let ambient = vec3<f32>(0.2, 0.5, 1.0);
-//     let ambient_strenght = 0.02;
+//     let ambient_strength = 0.02;
 //     let light_dir = vec3<f32>(1.0, 1.0, 2.0) / sqrt(6.0);
 //     let x = in.local_space.x; let y = in.local_space.y;
 //     let normal = vec3<f32>(x, y, sqrt(1.0 - x*x - y*y));
 //     let brightness = (0.5 + max(dot(light_dir, normal), -0.5)) / 1.5;
-//     return vec4<f32>(ambient * ambient_strenght + in.color * ((1.0 - ambient_strenght) * brightness * brightness * brightness), 1.0);
+//     return vec4<f32>(ambient * ambient_strength + in.color * ((1.0 - ambient_strength) * brightness * brightness * brightness), 1.0);
 // }
