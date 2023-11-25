@@ -653,7 +653,7 @@ impl Simulation {
 }
 
 fn hue2rgb(hue: f32) -> u32 {
-    let hue = hue.rem_euclid(1.0);
+    let hue = hue.fract();
     let x: f32 = 1.0 - (((hue * 6.0) % 2.0) - 1.0).abs();
     let i = (hue * 6.0).floor() as u32;
     let (r, g, b) = match i {
