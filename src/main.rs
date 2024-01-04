@@ -13,7 +13,6 @@ static RENDERER_CLONE: Lazy<Mutex<Vec<Renderer>>> = Lazy::new(|| Mutex::new(Vec:
 
 fn main() {
     let config = quarkstrom::Config {
-        view_size: 512.0,
         window_mode: quarkstrom::WindowMode::Windowed(1280, 720),
     };
     quarkstrom::run::<Renderer>(config);
@@ -49,6 +48,9 @@ enum Boundary {
 
 #[derive(Clone)]
 struct Renderer {
+    pos: Vec2,
+    scale: f32,
+
     pub restart: bool,
     pub boundary: Boundary,
     pub num_particles: usize,
@@ -63,6 +65,9 @@ struct Renderer {
 impl quarkstrom::Renderer for Renderer {
     fn new() -> Self {
         Self {
+            pos: Vec2::zero(),
+            scale: 512.0,
+
             restart: false,
             boundary: Boundary::Square(500.0),
             num_particles: 500,
@@ -237,11 +242,37 @@ impl quarkstrom::Renderer for Renderer {
         RENDERER_CLONE.lock().push(self.clone());
     }
 
-    fn input(&mut self, _: &winit_input_helper::WinitInputHelper) {
+    fn input(&mut self, input: &winit_input_helper::WinitInputHelper, width: u16, height: u16) {
+        if let Some((mx, my)) = input.mouse() {
+            // Scroll steps to double/halve the scale
+            let steps = 5.0;
 
+            // Modify input
+            let zoom = (-input.scroll_diff() / steps).exp2();
+
+            // Screen space -> view space
+            let target =
+                Vec2::new(mx * 2.0 - width as f32, height as f32 - my * 2.0) / height as f32;
+
+            // Move view position based on target
+            self.pos += target * self.scale * (1.0 - zoom);
+
+            // Zoom
+            self.scale *= zoom;
+        }
+
+        // Grab
+        if input.mouse_held(2) {
+            let (mdx, mdy) = input.mouse_diff();
+            self.pos.x -= mdx / height as f32 * self.scale * 2.0;
+            self.pos.y += mdy / height as f32 * self.scale * 2.0;
+        }
     }
 
     fn render(&mut self, ctx: &mut quarkstrom::RenderContext) {
+        ctx.set_view_pos(self.pos);
+        ctx.set_view_scale(self.scale);
+
         if let Some(particles) = PARTICLES.lock().clone() {
             ctx.clear_circles();
             ctx.clear_lines();

@@ -87,7 +87,6 @@ struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    input: WinitInputHelper,
     vertices: u32,
     vertex_buffer: wgpu::Buffer,
     instances: u32,
@@ -103,9 +102,7 @@ struct State {
 
 impl State {
     // Creating some of the wgpu types requires async code
-    async fn new(window: Window, config: Config) -> Self {
-        let in_config = config;
-
+    async fn new(window: Window) -> Self {
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -178,7 +175,7 @@ impl State {
 
         let view = View {
             position: Vec2::zero(),
-            scale: in_config.view_size,
+            scale: 1.0,
             x: config.width as u16,
             y: config.height as u16,
         };
@@ -318,8 +315,6 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let input = WinitInputHelper::new();
-
         Self {
             window,
             surface,
@@ -327,7 +322,6 @@ impl State {
             queue,
             config,
             size,
-            input,
             vertices,
             vertex_buffer,
             instances,
@@ -357,7 +351,7 @@ impl State {
         }
     }
 
-    fn set_vertices(&mut self, vertices: &Vec<Vertex>) {
+    fn set_vertices(&mut self, vertices: &[Vertex]) {
         self.vertices = vertices.len() as u32;
         self.queue.write_buffer(
             &self.vertex_buffer,
@@ -366,7 +360,7 @@ impl State {
         );
     }
 
-    fn set_instances(&mut self, instances: &Vec<Instance>) {
+    fn set_instances(&mut self, instances: &[Instance]) {
         self.instances = instances.len() as u32;
         self.queue.write_buffer(
             &self.instance_buffer,
@@ -375,37 +369,9 @@ impl State {
         );
     }
 
-    fn input(&mut self, event: &Event<()>) {
+    fn input(&mut self, event: &Event<()>) -> bool {
         // If gui doesn't want exclusive access and it's time to update
-        if !self.gui.handle_event(event) && self.input.update(event) {
-            // Zoom
-            if let Some((mx, my)) = self.input.mouse() {
-                // Scroll steps to double/halve the scale
-                let steps = 5.0;
-
-                // Modify input
-                let zoom = (-self.input.scroll_diff() / steps).exp2();
-
-                // Screen space -> view space
-                let target = Vec2::new(
-                    mx * 2.0 - self.size.width as f32,
-                    self.size.height as f32 - my * 2.0,
-                ) / self.size.height as f32;
-
-                // Move view position based on target
-                self.view.position += target * self.view.scale * (1.0 - zoom);
-
-                // Zoom
-                self.view.scale *= zoom;
-            }
-
-            // Grab
-            if self.input.mouse_held(2) {
-                let (mdx, mdy) = self.input.mouse_diff();
-                self.view.position.x -= mdx / self.size.height as f32 * self.view.scale * 2.0;
-                self.view.position.y += mdy / self.size.height as f32 * self.view.scale * 2.0;
-            }
-        }
+        !self.gui.handle_event(event)
     }
 
     fn render(&mut self, gui: &mut dyn FnMut(&egui::Context)) -> Result<(), wgpu::SurfaceError> {
@@ -481,11 +447,12 @@ pub enum WindowMode {
 
 #[derive(Clone, Copy)]
 pub struct Config {
-    pub view_size: f32,
     pub window_mode: WindowMode,
 }
 
 pub struct RenderContext {
+    pos: Vec2,
+    scale: f32,
     circles: Vec<Instance>,
     lines: Vec<Vertex>,
 }
@@ -493,9 +460,19 @@ pub struct RenderContext {
 impl RenderContext {
     fn new() -> Self {
         Self {
+            pos: Vec2::zero(),
+            scale: 1.0,
             circles: Vec::new(),
             lines: Vec::new(),
         }
+    }
+
+    pub fn set_view_pos(&mut self, pos: Vec2) {
+        self.pos = pos;
+    }
+    
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.scale = scale;
     }
 
     pub fn clear_lines(&mut self) {
@@ -518,7 +495,7 @@ impl RenderContext {
 
 pub trait Renderer {
     fn new() -> Self;
-    fn input(&mut self, input: &WinitInputHelper);
+    fn input(&mut self, input: &WinitInputHelper, width: u16, height: u16);
     fn render(&mut self, ctx: &mut RenderContext);
     fn gui(&mut self, ctx: &egui::Context);
 }
@@ -558,12 +535,15 @@ where
             .build(&event_loop)
             .unwrap();
 
-        let mut state = pollster::block_on(State::new(window, config));
+        let mut state = pollster::block_on(State::new(window));
+        let mut input = WinitInputHelper::new();
         let mut renderer = R::new();
         let mut render_ctx = RenderContext::new();
 
         event_loop.run(move |event, _, control_flow| {
-            state.input(&event);
+            if state.input(&event) {
+                input.update(&event);
+            }
 
             match event {
                 Event::WindowEvent {
@@ -589,9 +569,10 @@ where
                     _ => {}
                 },
                 Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                    renderer.input(&state.input);
+                    renderer.input(&input, state.view.x, state.view.y);
                     renderer.render(&mut render_ctx);
-                    // TODO: Could be in a need to set basis (optimization)
+                    state.view.position = render_ctx.pos;
+                    state.view.scale = render_ctx.scale;
                     state.set_instances(&render_ctx.circles);
                     state.set_vertices(&render_ctx.lines);
 
