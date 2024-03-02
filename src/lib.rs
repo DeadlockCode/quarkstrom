@@ -11,7 +11,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::gui::GuiHandler;
 use ultraviolet::Vec2;
 use winit::{
-    dpi::{PhysicalSize, PhysicalPosition},
+    dpi::{PhysicalPosition, PhysicalSize},
     event::*,
     event_loop::{ControlFlow, EventLoopBuilder},
     platform::windows::EventLoopBuilderExtWindows,
@@ -216,7 +216,7 @@ impl State {
                 bind_group_layouts: &[&view_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        
+
         let line_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&line_render_pipeline_layout),
@@ -255,43 +255,44 @@ impl State {
                 push_constant_ranges: &[],
             });
 
-        let circle_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&circle_render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &circle_shader,
-                entry_point: "vs_main",
-                buffers: &[Instance::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &circle_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: true,
-            },
-            depth_stencil: None, // 1.
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
+        let circle_render_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                layout: Some(&circle_render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &circle_shader,
+                    entry_point: "vs_main",
+                    buffers: &[Instance::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &circle_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    // Requires Features::DEPTH_CLIP_CONTROL
+                    unclipped_depth: false,
+                    // Requires Features::CONSERVATIVE_RASTERIZATION
+                    conservative: true,
+                },
+                depth_stencil: None, // 1.
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
 
         let vertices = 0;
 
@@ -353,20 +354,14 @@ impl State {
 
     fn set_vertices(&mut self, vertices: &[Vertex]) {
         self.vertices = vertices.len() as u32;
-        self.queue.write_buffer(
-            &self.vertex_buffer,
-            0,
-            bytemuck::cast_slice(vertices),
-        );
+        self.queue
+            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
     }
 
     fn set_instances(&mut self, instances: &[Instance]) {
         self.instances = instances.len() as u32;
-        self.queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(instances),
-        );
+        self.queue
+            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
     }
 
     fn input(&mut self, event: &Event<()>) -> bool {
@@ -470,7 +465,7 @@ impl RenderContext {
     pub fn set_view_pos(&mut self, pos: Vec2) {
         self.pos = pos;
     }
-    
+
     pub fn set_view_scale(&mut self, scale: f32) {
         self.scale = scale;
     }
@@ -484,7 +479,11 @@ impl RenderContext {
     }
 
     pub fn draw_circle(&mut self, position: Vec2, radius: f32, color: u32) {
-        self.circles.push(Instance { position, radius, color });
+        self.circles.push(Instance {
+            position,
+            radius,
+            color,
+        });
     }
 
     pub fn draw_line(&mut self, src: Vec2, dst: Vec2, color: u32) {
@@ -509,31 +508,27 @@ where
     thread::spawn(move || {
         let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
 
-        let mut builder = WindowBuilder::new()
-            .with_title("Quarkstrom");
+        let mut builder = WindowBuilder::new().with_title("Quarkstrom");
 
         match config.window_mode {
-            WindowMode::Windowed(width, height) =>  {
+            WindowMode::Windowed(width, height) => {
                 let monitor = event_loop.primary_monitor().unwrap();
                 let size = monitor.size();
                 let position = PhysicalPosition::new(
-                    (size.width - width) as i32 / 2, 
-                    (size.height - height) as i32 / 2
+                    (size.width - width) as i32 / 2,
+                    (size.height - height) as i32 / 2,
                 );
                 builder = builder
                     .with_inner_size(PhysicalSize::new(width, height))
                     .with_position(position);
-            },
+            }
             WindowMode::Fullscreen => {
-                builder = builder
-                    .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-            },
+                builder =
+                    builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
         }
 
-
-        let window = builder
-            .build(&event_loop)
-            .unwrap();
+        let window = builder.build(&event_loop).unwrap();
 
         let mut state = pollster::block_on(State::new(window));
         let mut input = WinitInputHelper::new();
