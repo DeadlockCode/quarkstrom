@@ -29,6 +29,7 @@ struct VertexOutput {
     @builtin(position) clip_space: vec4<f32>,
     @location(0) local_space: vec2<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) pixel_size: f32,
 };
 
 @vertex
@@ -76,6 +77,7 @@ fn vs_main(
     out.clip_space  = clip_space;
     out.local_space = local_space;
     out.color       = color;
+    out.pixel_size  = view.scale / (radius * f32(y));
     return out;
 }
 
@@ -83,24 +85,20 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if dot(in.local_space, in.local_space) > 1.0 {
-        discard;
-    }
-    return vec4<f32>(in.color, 1.0);
+    let alpha = 1.0 - smoothstep(1.0 - 3.0 * in.pixel_size, 1.0, length(in.local_space));
+    return vec4<f32>(in.color, alpha);
 }
 
 // Version of fragment shader with lighting (diffuse + ambient)
 //
 // @fragment
 // fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-//     if dot(in.local_space, in.local_space) > 1.0 {
-//         discard;
-//     }
+//     let alpha = 1.0 - smoothstep(1.0 - 3.0 * in.pixel_size, 1.0, length(in.local_space));
 //     let ambient = vec3<f32>(0.2, 0.5, 1.0);
 //     let ambient_strength = 0.02;
 //     let light_dir = vec3<f32>(1.0, 1.0, 2.0) / sqrt(6.0);
 //     let x = in.local_space.x; let y = in.local_space.y;
 //     let normal = vec3<f32>(x, y, sqrt(1.0 - x*x - y*y));
 //     let brightness = (0.5 + max(dot(light_dir, normal), -0.5)) / 1.5;
-//     return vec4<f32>(ambient * ambient_strength + in.color * ((1.0 - ambient_strength) * brightness * brightness * brightness), 1.0);
+//     return vec4<f32>(ambient * ambient_strength + in.color * ((1.0 - ambient_strength) * brightness * brightness * brightness), alpha);
 // }

@@ -1,4 +1,7 @@
-use std::{f32::consts::TAU, time::{Instant, Duration}};
+use std::{
+    f32::consts::TAU,
+    time::{Duration, Instant},
+};
 
 use egui::{mutex::Mutex, Color32, Response, Ui};
 use fastrand;
@@ -20,8 +23,7 @@ fn main() {
     // Assign a value to cap the tps
     let tps_cap: Option<u32> = None;
 
-    let desired_frame_time = tps_cap
-        .map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
+    let desired_frame_time = tps_cap.map(|tps| Duration::from_secs_f64(1.0 / tps as f64));
 
     let mut simulation = Simulation::new();
 
@@ -278,8 +280,12 @@ impl quarkstrom::Renderer for Renderer {
             ctx.clear_lines();
 
             for particle in particles {
-                ctx.draw_circle(particle.pos, 1.0, hue2rgb(particle.typ as f32 / self.types as f32));
-                
+                ctx.draw_circle(
+                    particle.pos,
+                    1.0,
+                    hue2rgb(particle.typ as f32 / self.types as f32),
+                );
+
                 match self.boundary {
                     Boundary::Square(side) => {
                         let s = side * 0.5;
@@ -299,19 +305,31 @@ impl quarkstrom::Renderer for Renderer {
                                 if x == 0 && y == 0 {
                                     continue;
                                 }
-                                ctx.draw_circle(particle.pos + Vec2::new(side * x as f32, side * y as f32), 1.0, 0x888888);
+                                ctx.draw_circle(
+                                    particle.pos + Vec2::new(side * x as f32, side * y as f32),
+                                    1.0,
+                                    0x888888,
+                                );
                             }
                         }
                     }
                     Boundary::ReflectedCircle(radius) => {
                         if particle.pos != Vec2::zero() {
-                            ctx.draw_circle(particle.pos * (1.0 - particle.pos.mag().recip() * (2.0 * radius)), 1.0, 0x888888);
+                            ctx.draw_circle(
+                                particle.pos * (1.0 - particle.pos.mag().recip() * (2.0 * radius)),
+                                1.0,
+                                0x888888,
+                            );
                         }
                     }
                     Boundary::InverseCircle(radius) => {
                         let mag_sq = particle.pos.mag_sq();
                         if mag_sq > 0.1 * radius {
-                            ctx.draw_circle(-particle.pos / mag_sq * radius * radius, 1.0 / mag_sq * radius * radius, 0x888888);
+                            ctx.draw_circle(
+                                -particle.pos / mag_sq * radius * radius,
+                                1.0 / mag_sq * radius * radius,
+                                0x888888,
+                            );
                         }
                     }
                     Boundary::None => {}
@@ -464,7 +482,7 @@ impl Simulation {
             }
         }
     }
-    
+
     fn new() -> Self {
         let world = World {
             boundary: Boundary::Square(500.0),
