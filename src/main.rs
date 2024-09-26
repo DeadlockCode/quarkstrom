@@ -283,7 +283,7 @@ impl quarkstrom::Renderer for Renderer {
                 ctx.draw_circle(
                     particle.pos,
                     1.0,
-                    hue2rgb(particle.typ as f32 / self.types as f32),
+                    hue2u8x4(particle.typ as f32 / self.types as f32),
                 );
 
                 match self.boundary {
@@ -295,10 +295,10 @@ impl quarkstrom::Renderer for Renderer {
                             Vec2::new(-s, -s),
                             Vec2::new(-s, s),
                         ];
-                        ctx.draw_line(p[0], p[1], 0x080808);
-                        ctx.draw_line(p[1], p[2], 0x080808);
-                        ctx.draw_line(p[2], p[3], 0x080808);
-                        ctx.draw_line(p[3], p[0], 0x080808);
+                        ctx.draw_line(p[0], p[1], [0x08, 0x08, 0x08, 0xff]);
+                        ctx.draw_line(p[1], p[2], [0x08, 0x08, 0x08, 0xff]);
+                        ctx.draw_line(p[2], p[3], [0x08, 0x08, 0x08, 0xff]);
+                        ctx.draw_line(p[3], p[0], [0x08, 0x08, 0x08, 0xff]);
 
                         for x in -1..=1 {
                             for y in -1..=1 {
@@ -308,7 +308,7 @@ impl quarkstrom::Renderer for Renderer {
                                 ctx.draw_circle(
                                     particle.pos + Vec2::new(side * x as f32, side * y as f32),
                                     1.0,
-                                    0x888888,
+                                    [0x88, 0x88, 0x88, 0xff],
                                 );
                             }
                         }
@@ -318,7 +318,7 @@ impl quarkstrom::Renderer for Renderer {
                             ctx.draw_circle(
                                 particle.pos * (1.0 - particle.pos.mag().recip() * (2.0 * radius)),
                                 1.0,
-                                0x888888,
+                                [0x88, 0x88, 0x88, 0xff],
                             );
                         }
                     }
@@ -328,7 +328,7 @@ impl quarkstrom::Renderer for Renderer {
                             ctx.draw_circle(
                                 -particle.pos / mag_sq * radius * radius,
                                 1.0 / mag_sq * radius * radius,
-                                0x888888,
+                                [0x88, 0x88, 0x88, 0xff],
                             );
                         }
                     }
@@ -701,7 +701,7 @@ impl Simulation {
     }
 }
 
-fn hue2rgb(hue: f32) -> u32 {
+fn hue2u8x4(hue: f32) -> [u8; 4] {
     let hue = hue.fract();
     let x: f32 = 1.0 - (((hue * 6.0) % 2.0) - 1.0).abs();
     let i = (hue * 6.0).floor() as u32;
@@ -714,7 +714,7 @@ fn hue2rgb(hue: f32) -> u32 {
         5 => (1.0, 0.0, x),
         _ => unreachable!(),
     };
-    ((r * 255.0) as u32) << 16 | ((g * 255.0) as u32) << 8 | (b * 255.0) as u32
+    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
 }
 
 struct Grid {

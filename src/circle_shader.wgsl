@@ -22,13 +22,13 @@ struct VertexInput {
 struct InstanceInput {
     @location(0) position: vec2<f32>,
     @location(1) radius: f32,
-    @location(2) color: u32,
+    @location(2) color: vec4<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_space: vec4<f32>,
     @location(0) local_space: vec2<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
     @location(2) pixel_size: f32,
 };
 
@@ -43,12 +43,6 @@ fn vs_main(
     let y = (view.xy >> 16u) & 0xffffu;
     let aspect = f32(y) / f32(x);
 
-    // Hexadecimal -> RGB 0-1
-    let r = (instance.color >> 16u);
-    let g = (instance.color >> 8u ) & 0xffu;
-    let b = (instance.color       ) & 0xffu;
-    let color = vec3(f32(r), f32(g), f32(b)) / 255.0;
-
     // Local space
     let local_space = VERTICES[vertex.index];
 
@@ -57,11 +51,11 @@ fn vs_main(
     var position = instance.position;
     var radius = instance.radius;
     if radius * f32(y) < 1.414214 * view.scale {
-        let one = ((position - view.position) / view.scale);
-        let two = (floor(one * f32(y)) + 0.5) / f32(y);
-        let three = two * view.scale + view.position;
-        position = three;
-        radius = view.scale / f32(y);
+        let a = (position - view.position) / view.scale;
+        let b = (floor(a * f32(y)) + 0.5) / f32(y);
+        let c = b * view.scale + view.position;
+        position = c;
+        radius = 1.414214 * view.scale / f32(y);
     }
 
     // Object space -> World space
@@ -76,7 +70,7 @@ fn vs_main(
     // Return
     out.clip_space  = clip_space;
     out.local_space = local_space;
-    out.color       = color;
+    out.color       = vec4(pow(instance.color.rgb, vec3(2.2)), instance.color.a);
     out.pixel_size  = view.scale / (radius * f32(y));
     return out;
 }
@@ -86,7 +80,7 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = 1.0 - smoothstep(1.0 - 3.0 * in.pixel_size, 1.0, length(in.local_space));
-    return vec4<f32>(in.color, alpha);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 
 // Version of fragment shader with lighting (diffuse + ambient)
@@ -100,5 +94,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 //     let x = in.local_space.x; let y = in.local_space.y;
 //     let normal = vec3<f32>(x, y, sqrt(1.0 - x*x - y*y));
 //     let brightness = (0.5 + max(dot(light_dir, normal), -0.5)) / 1.5;
-//     return vec4<f32>(ambient * ambient_strength + in.color * ((1.0 - ambient_strength) * brightness * brightness * brightness), alpha);
+//     return vec4<f32>(ambient * ambient_strength + in.color.rgb * ((1.0 - ambient_strength) * brightness * brightness * brightness), in.color.a * alpha);
 // }
