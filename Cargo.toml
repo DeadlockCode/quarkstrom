@@ -11,10 +11,6 @@ wgpu = "0.16.1"
 winit = "0.28.6"
 winit_input_helper = "0.14.1"
 
-# Debug
-env_logger = "0.10"
-log = "0.4"
-
 # Gui
 egui = "0.22.0"
 egui-wgpu = "0.22.0"

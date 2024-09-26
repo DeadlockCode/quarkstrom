@@ -35,9 +35,33 @@ unsafe impl Zeroable for View {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct Rect {
+    pub min: Vec2,
+    pub max: Vec2,
+    pub color: [u8; 4],
+}
+
+unsafe impl Pod for Rect {}
+unsafe impl Zeroable for Rect {}
+
+impl Rect {
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Rect>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Vertex {
     pub pos: Vec2,
-    pub color: u32,
+    pub color: [u8; 4],
 }
 
 unsafe impl Pod for Vertex {}
@@ -45,7 +69,7 @@ unsafe impl Zeroable for Vertex {}
 
 impl Vertex {
     const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32];
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
@@ -61,7 +85,7 @@ impl Vertex {
 pub struct Instance {
     pub position: Vec2,
     pub radius: f32,
-    pub color: u32,
+    pub color: [u8; 4],
 }
 
 unsafe impl Pod for Instance {}
@@ -69,7 +93,7 @@ unsafe impl Zeroable for Instance {}
 
 impl Instance {
     const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Uint32];
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Unorm8x4];
 
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
@@ -87,10 +111,13 @@ struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    rects: u32,
+    rect_buffer: wgpu::Buffer,
     vertices: u32,
     vertex_buffer: wgpu::Buffer,
     instances: u32,
     instance_buffer: wgpu::Buffer,
+    rect_render_pipeline: wgpu::RenderPipeline,
     line_render_pipeline: wgpu::RenderPipeline,
     circle_render_pipeline: wgpu::RenderPipeline,
     view: View,
@@ -172,6 +199,7 @@ impl State {
 
         let circle_shader = device.create_shader_module(wgpu::include_wgsl!("circle_shader.wgsl"));
         let line_shader = device.create_shader_module(wgpu::include_wgsl!("line_shader.wgsl"));
+        let rect_shader = device.create_shader_module(wgpu::include_wgsl!("rect_shader.wgsl"));
 
         let view = View {
             position: Vec2::zero(),
@@ -208,6 +236,45 @@ impl State {
                 binding: 0,
                 resource: view_buffer.as_entire_binding(),
             }],
+        });
+
+        let rect_render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&view_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let rect_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&rect_render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: "vs_main",
+                buffers: &[Rect::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                front_face: wgpu::FrontFace::Ccw,
+                conservative: true,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
         });
 
         let line_render_pipeline_layout =
@@ -294,6 +361,17 @@ impl State {
                 multiview: None,
             });
 
+        let rects = 0;
+
+        let rect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Rect Buffer"),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST,
+            size: 1 << 28,
+            mapped_at_creation: false,
+        });
+
         let vertices = 0;
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -301,7 +379,7 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-            size: 1 << 24,
+            size: 1 << 28,
             mapped_at_creation: false,
         });
 
@@ -312,7 +390,7 @@ impl State {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::COPY_DST,
-            size: 1 << 24,
+            size: 1 << 28,
             mapped_at_creation: false,
         });
 
@@ -323,10 +401,13 @@ impl State {
             queue,
             config,
             size,
+            rects,
+            rect_buffer,
             vertices,
             vertex_buffer,
             instances,
             instance_buffer,
+            rect_render_pipeline,
             line_render_pipeline,
             circle_render_pipeline,
             view,
@@ -350,6 +431,12 @@ impl State {
             self.view.x = new_size.width as u16;
             self.view.y = new_size.height as u16;
         }
+    }
+
+    fn set_rects(&mut self, rects: &[Rect]) {
+        self.rects = rects.len() as u32;
+        self.queue
+            .write_buffer(&self.rect_buffer, 0, bytemuck::cast_slice(rects));
     }
 
     fn set_vertices(&mut self, vertices: &[Vertex]) {
@@ -411,6 +498,11 @@ impl State {
                 depth_stencil_attachment: None,
             });
 
+            render_pass.set_pipeline(&self.rect_render_pipeline);
+            render_pass.set_bind_group(0, &self.view_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.rect_buffer.slice(..));
+            render_pass.draw(0..4, 0..self.rects);
+
             render_pass.set_pipeline(&self.line_render_pipeline);
             render_pass.set_bind_group(0, &self.view_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -450,6 +542,7 @@ pub struct RenderContext {
     scale: f32,
     circles: Vec<Instance>,
     lines: Vec<Vertex>,
+    rects: Vec<Rect>,
 }
 
 impl RenderContext {
@@ -459,6 +552,7 @@ impl RenderContext {
             scale: 1.0,
             circles: Vec::new(),
             lines: Vec::new(),
+            rects: Vec::new(),
         }
     }
 
@@ -470,6 +564,10 @@ impl RenderContext {
         self.scale = scale;
     }
 
+    pub fn clear_rects(&mut self) {
+        self.rects.clear();
+    }
+
     pub fn clear_lines(&mut self) {
         self.lines.clear();
     }
@@ -478,7 +576,7 @@ impl RenderContext {
         self.circles.clear();
     }
 
-    pub fn draw_circle(&mut self, position: Vec2, radius: f32, color: u32) {
+    pub fn draw_circle(&mut self, position: Vec2, radius: f32, color: [u8; 4]) {
         self.circles.push(Instance {
             position,
             radius,
@@ -486,9 +584,13 @@ impl RenderContext {
         });
     }
 
-    pub fn draw_line(&mut self, src: Vec2, dst: Vec2, color: u32) {
+    pub fn draw_line(&mut self, src: Vec2, dst: Vec2, color: [u8; 4]) {
         self.lines.push(Vertex { pos: src, color });
         self.lines.push(Vertex { pos: dst, color });
+    }
+
+    pub fn draw_rect(&mut self, min: Vec2, max: Vec2, color: [u8; 4]) {
+        self.rects.push(Rect { min, max, color });
     }
 }
 
@@ -503,8 +605,6 @@ pub fn run<R>(config: Config)
 where
     R: Renderer + 'static,
 {
-    env_logger::init();
-
     thread::spawn(move || {
         let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
 
@@ -570,6 +670,7 @@ where
                     state.view.scale = render_ctx.scale;
                     state.set_instances(&render_ctx.circles);
                     state.set_vertices(&render_ctx.lines);
+                    state.set_rects(&render_ctx.rects);
 
                     match state.render(&mut |ctx| renderer.gui(ctx)) {
                         Ok(_) => {}
