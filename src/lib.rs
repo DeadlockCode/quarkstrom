@@ -4,8 +4,6 @@ pub use wgpu;
 pub use winit;
 pub use winit_input_helper;
 
-use std::thread;
-
 use bytemuck::{Pod, Zeroable};
 
 use crate::gui::GuiHandler;
@@ -14,7 +12,6 @@ use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::*,
     event_loop::{ControlFlow, EventLoopBuilder},
-    platform::windows::EventLoopBuilderExtWindows,
     window::{Window, WindowBuilder},
 };
 
@@ -605,8 +602,7 @@ pub fn run<R>(config: Config)
 where
     R: Renderer + 'static,
 {
-    thread::spawn(move || {
-        let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
+        let event_loop = EventLoopBuilder::new().build();
 
         let mut builder = WindowBuilder::new().with_title("Quarkstrom");
 
@@ -690,5 +686,4 @@ where
                 _ => {}
             }
         });
-    });
 }

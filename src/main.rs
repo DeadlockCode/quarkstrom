@@ -18,7 +18,6 @@ fn main() {
     let config = quarkstrom::Config {
         window_mode: quarkstrom::WindowMode::Windowed(1280, 720),
     };
-    quarkstrom::run::<Renderer>(config);
 
     // Assign a value to cap the tps
     let tps_cap: Option<u32> = None;
@@ -27,6 +26,7 @@ fn main() {
 
     let mut simulation = Simulation::new();
 
+    std::thread::spawn(move || {
     loop {
         let frame_timer = Instant::now();
 
@@ -38,6 +38,9 @@ fn main() {
             while frame_timer.elapsed() < desired_frame_time {}
         }
     }
+    });
+
+    quarkstrom::run::<Renderer>(config);
 }
 
 #[derive(Clone)]
