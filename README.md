@@ -1,6 +1,5 @@
 # Quarkstrom
 This is the official repository for the code shown in this [video](https://www.youtube.com/watch?v=VEnglRKNHjU).
-I will not be accepting contributions as this is meant to (at least somewhat) match what was shown.
 To the one person who is going to use this, I'm sorry for what you're about to go through.
 I made it for myself and therefore there is no documentation and the 'API' (if you can even call it that) is lacking.
 
