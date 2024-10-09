@@ -27,17 +27,17 @@ fn main() {
     let mut simulation = Simulation::new();
 
     std::thread::spawn(move || {
-    loop {
-        let frame_timer = Instant::now();
+        loop {
+            let frame_timer = Instant::now();
 
-        simulation.update();
-        simulation.convert();
+            simulation.update();
+            simulation.convert();
 
-        // Cap tps
-        if let Some(desired_frame_time) = desired_frame_time {
-            while frame_timer.elapsed() < desired_frame_time {}
+            // Cap tps
+            if let Some(desired_frame_time) = desired_frame_time {
+                while frame_timer.elapsed() < desired_frame_time {}
+            }
         }
-    }
     });
 
     quarkstrom::run::<Renderer>(config);
