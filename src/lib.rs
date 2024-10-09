@@ -4,8 +4,6 @@ pub use wgpu;
 pub use winit;
 pub use winit_input_helper;
 
-use std::thread;
-
 use bytemuck::{Pod, Zeroable};
 
 use crate::gui::GuiHandler;
@@ -14,7 +12,6 @@ use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::*,
     event_loop::{ControlFlow, EventLoopBuilder},
-    platform::windows::EventLoopBuilderExtWindows,
     window::{Window, WindowBuilder},
 };
 
@@ -605,90 +602,88 @@ pub fn run<R>(config: Config)
 where
     R: Renderer + 'static,
 {
-    thread::spawn(move || {
-        let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
+    let event_loop = EventLoopBuilder::new().build();
 
-        let mut builder = WindowBuilder::new().with_title("Quarkstrom");
+    let mut builder = WindowBuilder::new().with_title("Quarkstrom");
 
-        match config.window_mode {
-            WindowMode::Windowed(width, height) => {
-                let monitor = event_loop.primary_monitor().unwrap();
-                let size = monitor.size();
-                let position = PhysicalPosition::new(
-                    (size.width - width) as i32 / 2,
-                    (size.height - height) as i32 / 2,
-                );
-                builder = builder
-                    .with_inner_size(PhysicalSize::new(width, height))
-                    .with_position(position);
-            }
-            WindowMode::Fullscreen => {
-                builder =
-                    builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-            }
+    match config.window_mode {
+        WindowMode::Windowed(width, height) => {
+            let monitor = event_loop.primary_monitor().unwrap();
+            let size = monitor.size();
+            let position = PhysicalPosition::new(
+                (size.width - width) as i32 / 2,
+                (size.height - height) as i32 / 2,
+            );
+            builder = builder
+                .with_inner_size(PhysicalSize::new(width, height))
+                .with_position(position);
+        }
+        WindowMode::Fullscreen => {
+            builder =
+                builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
+    let window = builder.build(&event_loop).unwrap();
+
+    let mut state = pollster::block_on(State::new(window));
+    let mut input = WinitInputHelper::new();
+    let mut renderer = R::new();
+    let mut render_ctx = RenderContext::new();
+
+    event_loop.run(move |event, _, control_flow| {
+        if state.input(&event) {
+            input.update(&event);
         }
 
-        let window = builder.build(&event_loop).unwrap();
-
-        let mut state = pollster::block_on(State::new(window));
-        let mut input = WinitInputHelper::new();
-        let mut renderer = R::new();
-        let mut render_ctx = RenderContext::new();
-
-        event_loop.run(move |event, _, control_flow| {
-            if state.input(&event) {
-                input.update(&event);
-            }
-
-            match event {
-                Event::WindowEvent {
-                    ref event,
-                    window_id,
-                } if window_id == state.window().id() => match event {
-                    WindowEvent::CloseRequested
-                    | WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    } => *control_flow = ControlFlow::Exit,
-                    WindowEvent::Resized(physical_size) => {
-                        state.resize(*physical_size);
-                    }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        state.resize(**new_inner_size);
-                    }
-                    _ => {}
-                },
-                Event::RedrawRequested(window_id) if window_id == state.window().id() => {
-                    renderer.input(&input, state.view.x, state.view.y);
-                    renderer.render(&mut render_ctx);
-                    state.view.position = render_ctx.pos;
-                    state.view.scale = render_ctx.scale;
-                    state.set_instances(&render_ctx.circles);
-                    state.set_vertices(&render_ctx.lines);
-                    state.set_rects(&render_ctx.rects);
-
-                    match state.render(&mut |ctx| renderer.gui(ctx)) {
-                        Ok(_) => {}
-                        // Reconfigure the surface if lost
-                        Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                        // The system is out of memory, we should probably quit
-                        Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                        // All other errors (Outdated, Timeout) should be resolved by the next frame
-                        Err(e) => eprintln!("{:?}", e),
-                    }
+        match event {
+            Event::WindowEvent {
+                ref event,
+                window_id,
+            } if window_id == state.window().id() => match event {
+                WindowEvent::CloseRequested
+                | WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                } => *control_flow = ControlFlow::Exit,
+                WindowEvent::Resized(physical_size) => {
+                    state.resize(*physical_size);
                 }
-                Event::MainEventsCleared => {
-                    // RedrawRequested will only trigger once, unless we manually
-                    // request it.
-                    state.window().request_redraw();
+                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                    state.resize(**new_inner_size);
                 }
                 _ => {}
+            },
+            Event::RedrawRequested(window_id) if window_id == state.window().id() => {
+                renderer.input(&input, state.view.x, state.view.y);
+                renderer.render(&mut render_ctx);
+                state.view.position = render_ctx.pos;
+                state.view.scale = render_ctx.scale;
+                state.set_instances(&render_ctx.circles);
+                state.set_vertices(&render_ctx.lines);
+                state.set_rects(&render_ctx.rects);
+
+                match state.render(&mut |ctx| renderer.gui(ctx)) {
+                    Ok(_) => {}
+                    // Reconfigure the surface if lost
+                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                    // The system is out of memory, we should probably quit
+                    Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
+                    // All other errors (Outdated, Timeout) should be resolved by the next frame
+                    Err(e) => eprintln!("{:?}", e),
+                }
             }
-        });
+            Event::MainEventsCleared => {
+                // RedrawRequested will only trigger once, unless we manually
+                // request it.
+                state.window().request_redraw();
+            }
+            _ => {}
+        }
     });
 }
