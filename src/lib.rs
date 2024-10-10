@@ -608,19 +608,21 @@ where
 
     match config.window_mode {
         WindowMode::Windowed(width, height) => {
-            let monitor = event_loop.primary_monitor().unwrap();
-            let size = monitor.size();
-            let position = PhysicalPosition::new(
-                (size.width - width) as i32 / 2,
-                (size.height - height) as i32 / 2,
-            );
-            builder = builder
-                .with_inner_size(PhysicalSize::new(width, height))
-                .with_position(position);
+            //Set window size
+            builder = builder.with_inner_size(PhysicalSize::new(width, height));
+
+            //If a primary monitor can be found, position the window in the middle
+            if let Some(monitor) = event_loop.primary_monitor() {
+                let size = monitor.size();
+                let position = PhysicalPosition::new(
+                    (size.width - width) as i32 / 2,
+                    (size.height - height) as i32 / 2,
+                );
+                builder = builder.with_position(position);
+            }
         }
         WindowMode::Fullscreen => {
-            builder =
-                builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            builder = builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
         }
     }
 
